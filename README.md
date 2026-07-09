@@ -20,7 +20,7 @@ Dự án này là phiên bản nâng cấp giao diện, tối ưu hóa cơ chế
 
 ```
 Autocaption-v2/
-├── STT/                        # Thư mục chính chứa mã nguồn ứng dụng
+├
 │   ├── app.py                  # File khởi chạy ứng dụng chính (PySide6)
 │   ├── AutoCaption.css         # CSS tạo kiểu giao diện Dark-mode cao cấp
 │   ├── AutoCaption_logic.py    # Module cốt lõi định dạng và dịch phụ đề
@@ -38,14 +38,14 @@ Yêu cầu hệ thống đã cài đặt Python 3.9 trở lên.
 Mở Terminal/CMD tại thư mục dự án và chạy lệnh sau để cài đặt các thư viện cần thiết:
 
 ```bash
-pip install -r STT/requirements.txt
+pip install -r requirements.txt
 ```
 
 ### 2. Khởi chạy ứng dụng
 Chạy ứng dụng bằng lệnh:
 
 ```bash
-python STT/app.py
+python app.py
 ```
 
 ### 3. Tải tài nguyên ban đầu
@@ -60,7 +60,7 @@ Sau khi tải xong, phần mềm sẽ khởi chạy hoàn toàn ngoại tuyến 
 ## DaVinci Resolve Integration (`AutoCaption4DR.lua`)
 
 Script Lua chạy độc lập trực tiếp bên trong phần mềm DaVinci Resolve để tạo phụ đề tự động cho Timeline hiện tại của bạn:
-1. Sao chép tệp `STT/AutoCaption4DR.lua` vào thư mục Script của DaVinci Resolve trên máy tính:
+1. Sao chép tệp `AutoCaption4DR.lua` vào thư mục Script của DaVinci Resolve trên máy tính:
    * **Windows**: `C:\Users\<Tên-User>\AppData\Roaming\Blackmagic Design\DaVinci Resolve\Support\Fusion\Scripts\Comp\`
    * **macOS**: `/Users/<Tên-User>/Library/Application Support/Blackmagic Design/DaVinci Resolve/Support/Fusion/Scripts/Comp/`
 2. Mở DaVinci Resolve, chọn **Workspace → Scripts → AutoCaption4DR** để chạy.
@@ -75,12 +75,12 @@ Script Lua chạy độc lập trực tiếp bên trong phần mềm DaVinci Res
    ```bash
    pip install pyinstaller
    ```
-2. Mở Terminal/CMD tại thư mục `STT/` và chạy lệnh sau:
+2. Mở Terminal/CMD tại thư mục và chạy lệnh sau:
    ```bash
    python -m PyInstaller --clean --noconfirm WhisperSubtitler.spec
    ```
 3. Sau khi quá trình hoàn tất, file chạy độc lập sẽ được xuất ra tại thư mục:  
-   `STT/dist/WhisperSubtitler/WhisperSubtitler.exe`
+   `dist/WhisperSubtitler/WhisperSubtitler.exe`
 
 ---
 
