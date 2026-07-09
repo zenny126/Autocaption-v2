@@ -30,7 +30,9 @@ WHISPER_MAIN_PATH = os.path.join(BIN_DIR, "main.exe")
 
 # Download URLs
 FFMPEG_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
-WHISPER_URL = "https://github.com/ggml-org/whisper.cpp/releases/download/v1.9.1/whisper-blas-bin-x64.zip"
+WHISPER_URL_BLAS = "https://github.com/ggml-org/whisper.cpp/releases/download/v1.9.1/whisper-blas-bin-x64.zip"
+WHISPER_URL_CUDA_12 = "https://github.com/ggml-org/whisper.cpp/releases/download/v1.9.1/whisper-cublas-12.4.0-bin-x64.zip"
+WHISPER_URL_CUDA_11 = "https://github.com/ggml-org/whisper.cpp/releases/download/v1.9.1/whisper-cublas-11.8.0-bin-x64.zip"
 
 MODEL_URLS = {
     "Tiny (~75MB)": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin",
@@ -84,6 +86,14 @@ def load_stylesheet():
             pass
     return ""
 
+def check_cuda_backend_exists():
+    """Check if ggml-cuda.dll exists in the bin directory (including subdirs like Release/)."""
+    search_dirs = [BIN_DIR, os.path.join(BIN_DIR, "Release")]
+    for d in search_dirs:
+        if os.path.exists(os.path.join(d, "ggml-cuda.dll")):
+            return True
+    return False
+
 def check_system_assets():
     missing = []
     if not os.path.exists(FFMPEG_PATH):
@@ -91,6 +101,9 @@ def check_system_assets():
         
     whisper_exe = get_whisper_exe()
     if not whisper_exe:
+        missing.append("Whisper.cpp (C++ Engine)")
+    elif HAS_CUDA and not check_cuda_backend_exists():
+        # Whisper exe exists but CUDA backend is missing — need to re-download CUDA version
         missing.append("Whisper.cpp (C++ Engine)")
         
     models = []
@@ -101,7 +114,8 @@ def check_system_assets():
         
     return missing
 
-def check_gpu_available():
+def get_cuda_version():
+    """Detect CUDA version from nvidia-smi. Returns major version (e.g. 12, 11) or 0 if not available."""
     try:
         creation_flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
         res = subprocess.run(
@@ -109,13 +123,34 @@ def check_gpu_available():
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             creationflags=creation_flags,
-            timeout=2
+            timeout=5
         )
-        return res.returncode == 0
+        if res.returncode != 0:
+            return 0
+        output = res.stdout.decode("utf-8", errors="ignore")
+        # Parse "CUDA Version: XX.Y" from nvidia-smi output
+        import re
+        match = re.search(r"CUDA Version:\s*(\d+)\.(\d+)", output)
+        if match:
+            return int(match.group(1))
+        return 0
     except:
-        return False
+        return 0
 
-HAS_CUDA = check_gpu_available()
+def check_gpu_available():
+    return get_cuda_version() > 0
+
+CUDA_VERSION = get_cuda_version()
+HAS_CUDA = CUDA_VERSION > 0
+
+def get_whisper_download_url():
+    """Return the appropriate whisper.cpp download URL based on GPU/CUDA availability."""
+    if CUDA_VERSION >= 12:
+        return WHISPER_URL_CUDA_12
+    elif CUDA_VERSION >= 11:
+        return WHISPER_URL_CUDA_11
+    else:
+        return WHISPER_URL_BLAS
 
 
 class CardFrame(QtWidgets.QFrame):
@@ -353,9 +388,11 @@ class DownloadWorker(QtCore.QObject):
 
     def download_and_extract_whisper(self):
         zip_path = os.path.join(BIN_DIR, "whisper_temp.zip")
-        self.progress_signal.emit("Đang chuẩn bị tải Whisper.cpp...", 0)
+        whisper_url = get_whisper_download_url()
+        variant = "CUDA" if HAS_CUDA else "CPU (BLAS)"
+        self.progress_signal.emit(f"Đang chuẩn bị tải Whisper.cpp ({variant})...", 0)
         
-        if self.download_file_with_progress(WHISPER_URL, zip_path, "Tải Whisper Engine"):
+        if self.download_file_with_progress(whisper_url, zip_path, f"Tải Whisper Engine ({variant})"):
             self.progress_signal.emit("Đang giải nén Whisper Engine...", 95)
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
                 zip_ref.extractall(BIN_DIR)
@@ -429,7 +466,12 @@ class DownloaderDialog(QtWidgets.QDialog):
         items_layout.addWidget(lbl_items_title)
         
         for item in self.missing_items:
-            lbl_item = QtWidgets.QLabel(f"• {item}")
+            display_item = item
+            if item == "Whisper.cpp (C++ Engine)" and HAS_CUDA:
+                display_item = f"{item} [CUDA {CUDA_VERSION}.x - GPU]"
+            elif item == "Whisper.cpp (C++ Engine)":
+                display_item = f"{item} [BLAS - CPU]"
+            lbl_item = QtWidgets.QLabel(f"• {display_item}")
             lbl_item.setStyleSheet("color: #9fa8da; border: none; background: transparent;")
             items_layout.addWidget(lbl_item)
             
@@ -1156,7 +1198,9 @@ class MainWindow(QtWidgets.QMainWindow):
             device_idx = 0
             
         self._cmb_device.setCurrentIndex(device_idx)
-        if not HAS_CUDA:
+        if HAS_CUDA:
+            self._cmb_device.setItemText(1, f"GPU (CUDA {CUDA_VERSION}.x)")
+        else:
             self._cmb_device.setItemText(1, "GPU (CUDA) - Not Available")
             self._cmb_device.model().item(1).setEnabled(False)
         
