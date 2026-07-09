@@ -10,6 +10,7 @@ Copyright (c) 2026 Zenny126. Licensed under the MIT License.
 
 import os
 import sys
+import shutil
 import threading
 import subprocess
 import urllib.request
@@ -58,36 +59,18 @@ def format_size(bytes_num):
     return f"{bytes_num:.1f} TB"
 
 def get_whisper_exe():
-    if os.path.exists(WHISPER_CLI_PATH):
-        return WHISPER_CLI_PATH
-    if os.path.exists(WHISPER_MAIN_PATH):
-        return WHISPER_MAIN_PATH
-    
-    release_cli = os.path.join(BIN_DIR, "Release", "whisper-cli.exe")
-    if os.path.exists(release_cli):
-        return release_cli
-    release_main = os.path.join(BIN_DIR, "Release", "main.exe")
-    if os.path.exists(release_main):
-        return release_main
-        
-    if os.path.exists(BIN_DIR):
-        for root, dirs, files in os.walk(BIN_DIR):
-            if "whisper-cli.exe" in files:
-                return os.path.join(root, "whisper-cli.exe")
-            if "main.exe" in files:
-                return os.path.join(root, "main.exe")
-                
-    return None
+    candidates = [
+        WHISPER_CLI_PATH,
+        WHISPER_MAIN_PATH,
+        os.path.join(BIN_DIR, "Release", "whisper-cli.exe"),
+        os.path.join(BIN_DIR, "Release", "main.exe"),
+    ]
+    return next((p for p in candidates if os.path.exists(p)), None)
 
 def open_directory(path):
     if path and os.path.isdir(path):
         try:
-            if sys.platform == "win32":
-                os.startfile(path)
-            elif sys.platform == "darwin":
-                subprocess.Popen(["open", path])
-            else:
-                subprocess.Popen(["xdg-open", path])
+            os.startfile(path)
         except Exception:
             pass
 
@@ -761,12 +744,8 @@ class TranscribeWorker(QtCore.QObject):
                 
                 # Check for possible output names in BIN_DIR
                 possible_outputs = [
-                    os.path.join(BIN_DIR, f"temp_transcribe_{idx}.srt"),
                     os.path.join(BIN_DIR, f"temp_transcribe_{idx}.wav.srt"),
-                    os.path.join(os.getcwd(), f"temp_transcribe_{idx}.srt"),
-                    os.path.join(os.getcwd(), f"temp_transcribe_{idx}.wav.srt"),
-                    f"temp_transcribe_{idx}.srt",
-                    f"temp_transcribe_{idx}.wav.srt"
+                    os.path.join(BIN_DIR, f"temp_transcribe_{idx}.srt"),
                 ]
                 
                 found_srt = None
@@ -777,7 +756,6 @@ class TranscribeWorker(QtCore.QObject):
                         
                 if found_srt:
                     try:
-                        import shutil
                         if os.path.exists(output_file):
                             try: os.remove(output_file)
                             except: pass
@@ -1042,14 +1020,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._lbl_device.setStyleSheet("background: transparent; border: none; color: #A3A3A3;")
         self._cmb_device = QtWidgets.QComboBox()
         self._cmb_device.addItems(["CPU", "GPU (CUDA)"])
-        
-        if HAS_CUDA:
-            self._cmb_device.setCurrentIndex(1)
-        else:
-            self._cmb_device.setCurrentIndex(0)
-            self._cmb_device.setItemText(1, "GPU (CUDA) - Not Available")
-            self._cmb_device.model().item(1).setEnabled(False)
-            
         settings_form.addRow(self._lbl_device, self._cmb_device)
 
         # Thread count row
@@ -1073,9 +1043,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._progress.setFixedHeight(24)
         parent_layout.addWidget(self._progress)
         
-        self._progress_anim = QtCore.QPropertyAnimation(self._progress, b"value")
-        self._progress_anim.setDuration(400)
-        self._progress_anim.setEasingCurve(QtCore.QEasingCurve.OutCubic)
+
 
         btn_layout = QtWidgets.QHBoxLayout()
         btn_layout.setSpacing(12)
@@ -1355,10 +1323,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._status_label.setText(msg)
 
     def _on_progress(self, percent):
-        self._progress_anim.stop()
-        self._progress_anim.setStartValue(self._progress.value())
-        self._progress_anim.setEndValue(percent)
-        self._progress_anim.start()
+        self._progress.setValue(percent)
 
     def _on_finished(self, success, saved_paths, failed_files):
         if self._worker_thread:
@@ -1395,11 +1360,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
 def main():
     app = QtWidgets.QApplication(sys.argv)
-    
-    # Load custom theme stylesheet
-    style = load_stylesheet()
-    if style:
-        app.setStyleSheet(style)
     
     missing = check_system_assets()
     if missing:
