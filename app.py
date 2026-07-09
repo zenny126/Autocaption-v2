@@ -1026,10 +1026,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._lbl_threads = QtWidgets.QLabel("Số luồng CPU:")
         self._lbl_threads.setStyleSheet("background: transparent; border: none; color: #A3A3A3;")
         cpu_cores = os.cpu_count() or 4
-        self._spin_threads = QtWidgets.QSpinBox()
-        self._spin_threads.setRange(1, cpu_cores)
-        self._spin_threads.setValue(min(4, cpu_cores))
-        settings_form.addRow(self._lbl_threads, self._spin_threads)
+        self._cmb_threads = QtWidgets.QComboBox()
+        self._cmb_threads.addItems([str(i) for i in range(1, cpu_cores + 1)])
+        self._cmb_threads.setCurrentText(str(min(4, cpu_cores)))
+        settings_form.addRow(self._lbl_threads, self._cmb_threads)
 
         settings_layout.addLayout(settings_form)
 
@@ -1161,7 +1161,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._cmb_device.model().item(1).setEnabled(False)
         
         threads = int(settings.value("threads", min(4, os.cpu_count() or 4)))
-        self._spin_threads.setValue(threads)
+        self._cmb_threads.setCurrentText(str(threads))
 
         self._input_files_list.clear()
         input_files = settings.value("input_files_list", [])
@@ -1185,7 +1185,7 @@ class MainWindow(QtWidgets.QMainWindow):
         settings.setValue("save_same_folder", self._chk_same_folder.isChecked())
         settings.setValue("language", self._cmb_lang.currentText())
         settings.setValue("device_index", self._cmb_device.currentIndex())
-        settings.setValue("threads", self._spin_threads.value())
+        settings.setValue("threads", int(self._cmb_threads.currentText()))
         settings.setValue("input_files_list", self._input_files_list)
         
         if self._cmb_model.count() > 0 and not self._cmb_model.currentText().startswith("Chưa có model"):
@@ -1292,7 +1292,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._chk_same_folder.isChecked(), 
             model_selected, 
             self._cmb_lang.currentText(), 
-            self._spin_threads.value(),
+            int(self._cmb_threads.currentText()),
             device_val
         )
         self._worker_thread = QtCore.QThread()
