@@ -1,16 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
-
+from PyInstaller.utils.hooks import collect_data_files
 
 a = Analysis(
     ['app.py'],
     pathex=[],
     binaries=[],
-    datas=[('AutoCaption.css', '.')],
-    hiddenimports=[],
+    datas=[('AutoCaption.css', '.')] + collect_data_files('demucs'),
+    hiddenimports=['numpy', 'numpy.core', 'numpy.core.multiarray', 'numpy._core'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=['sqlite3', 'win32com', 'pythonwin', 'google', 'markupsafe', 'jinja2', 'fsspec'],
     noarchive=False,
     optimize=0,
 )

@@ -9,6 +9,7 @@ Copyright (c) 2026 Zenny126. Licensed under the MIT License.
 """
 
 import os
+import re
 import sys
 import shutil
 import threading
@@ -16,6 +17,8 @@ import subprocess
 import urllib.request
 import zipfile
 from PySide6 import QtWidgets, QtCore, QtGui
+
+CREATION_FLAGS = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 # Constants & Paths
 if getattr(sys, 'frozen', False):
@@ -59,6 +62,16 @@ def format_size(bytes_num):
             return f"{bytes_num:.1f} {unit}"
         bytes_num /= 1024
     return f"{bytes_num:.1f} TB"
+
+def get_audio_codec(file_path):
+    cmd = [FFMPEG_PATH, "-i", file_path]
+    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=CREATION_FLAGS)
+    _, stderr = process.communicate()
+    output = stderr.decode("utf-8", errors="ignore")
+    match = re.search(r"Audio:\s+([a-zA-Z0-9_]+)", output)
+    if match:
+        return match.group(1).lower()
+    return "mp3"
 
 def get_whisper_exe():
     candidates = [
@@ -117,19 +130,17 @@ def check_system_assets():
 def get_cuda_version():
     """Detect CUDA version from nvidia-smi. Returns major version (e.g. 12, 11) or 0 if not available."""
     try:
-        creation_flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
         res = subprocess.run(
             ["nvidia-smi"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            creationflags=creation_flags,
+            creationflags=CREATION_FLAGS,
             timeout=5
         )
         if res.returncode != 0:
             return 0
         output = res.stdout.decode("utf-8", errors="ignore")
         # Parse "CUDA Version: XX.Y" from nvidia-smi output
-        import re
         match = re.search(r"CUDA Version:\s*(\d+)\.(\d+)", output)
         if match:
             return int(match.group(1))
@@ -609,13 +620,13 @@ class DownloaderDialog(QtWidgets.QDialog):
                     self.model_combo.setEnabled(True)
 
 
-class TranscribeWorker(QtCore.QObject):
+class TranscribeWorker(QtCore.QThread):
     log_signal = QtCore.Signal(str)
     progress_signal = QtCore.Signal(int)
     status_signal = QtCore.Signal(str)
     finished_signal = QtCore.Signal(bool, list, list) # success, saved_paths, failed_files
     
-    def __init__(self, input_files, output_folder, save_same_folder, model_filename, lang_text, thread_count, device):
+    def __init__(self, input_files, output_folder, save_same_folder, model_filename, lang_text, thread_count, device, demucs_enabled, demucs_model="htdemucs"):
         super().__init__()
         self.input_files = input_files
         self.output_folder = output_folder
@@ -624,6 +635,8 @@ class TranscribeWorker(QtCore.QObject):
         self.lang_text = lang_text
         self.thread_count = thread_count
         self.device = device
+        self.demucs_enabled = demucs_enabled
+        self.demucs_model = demucs_model
         self.current_process = None
         self.cancelled = False
         
@@ -636,13 +649,21 @@ class TranscribeWorker(QtCore.QObject):
                 pass
                 
     def run(self):
+        try:
+            self._run_impl()
+        except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
+            self.log_signal.emit(f"\n[CRITICAL ERROR in Worker Thread]:\n{e}\n{tb}")
+            self.finished_signal.emit(False, [], [])
+
+    def _run_impl(self):
         saved_paths = []
         failed_files = []
         total_files = len(self.input_files)
         
-        # 1. Convert all input files to WAV sequentially
+        # 1. Convert all input files to WAV sequentially (and apply Demucs if enabled)
         temp_wav_files = []
-        creation_flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
         
         for idx, input_file in enumerate(self.input_files):
             if self.cancelled:
@@ -650,23 +671,30 @@ class TranscribeWorker(QtCore.QObject):
                 
             filename = os.path.basename(input_file)
             self.status_signal.emit(f"Đang chuyển đổi tệp {idx+1}/{total_files}: {filename}...")
-            self.log_signal.emit(f"FFmpeg: Chuyển đổi {filename} sang WAV 16kHz...")
             
             temp_wav = os.path.join(BIN_DIR, f"temp_transcribe_{idx}.wav")
             if os.path.exists(temp_wav):
                 try: os.remove(temp_wav)
                 except: pass
                 
-            ffmpeg_cmd = [
-                FFMPEG_PATH, "-y", "-i", input_file,
-                "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", temp_wav
-            ]
+            if self.demucs_enabled:
+                self.log_signal.emit(f"FFmpeg: Trích xuất âm thanh gốc chất lượng cao từ {filename}...")
+                ffmpeg_cmd = [
+                    FFMPEG_PATH, "-y", "-i", input_file,
+                    "-vn", "-acodec", "pcm_s16le", temp_wav
+                ]
+            else:
+                self.log_signal.emit(f"FFmpeg: Chuyển đổi {filename} sang WAV 16kHz...")
+                ffmpeg_cmd = [
+                    FFMPEG_PATH, "-y", "-i", input_file,
+                    "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", temp_wav
+                ]
             
             self.current_process = subprocess.Popen(
                 ffmpeg_cmd, 
                 stdout=subprocess.PIPE, 
                 stderr=subprocess.PIPE, 
-                creationflags=creation_flags
+                creationflags=CREATION_FLAGS
             )
             
             _, stderr = self.current_process.communicate()
@@ -680,8 +708,186 @@ class TranscribeWorker(QtCore.QObject):
                 failed_files.append((input_file, "FFmpeg failed"))
                 continue
                 
+            # If Demucs voice separation is enabled, perform it now
+            if self.demucs_enabled:
+                self.status_signal.emit(f"Đang tách giọng nói tệp {idx+1}/{total_files}...")
+                self.log_signal.emit(f"Demucs: Tách giọng nói (vocal) cho tệp {filename}...")
+                
+                temp_demucs_dir = os.path.join(BIN_DIR, f"demucs_out_{idx}")
+                if os.path.exists(temp_demucs_dir):
+                    try: shutil.rmtree(temp_demucs_dir)
+                    except: pass
+                os.makedirs(temp_demucs_dir, exist_ok=True)
+                
+                try:
+                    if getattr(sys, 'frozen', False):
+                        worker_cmd = [sys.executable, "--demucs-worker", self.demucs_model, temp_demucs_dir, temp_wav]
+                    else:
+                        worker_cmd = [sys.executable, os.path.abspath(sys.argv[0]), "--demucs-worker", self.demucs_model, temp_demucs_dir, temp_wav]
+                    
+                    self.current_process = subprocess.Popen(
+                        worker_cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        encoding="utf-8",
+                        errors="ignore",
+                        creationflags=CREATION_FLAGS
+                    )
+                    
+                    # Pipe output to log panel in real-time
+                    while True:
+                        line = self.current_process.stdout.readline()
+                        if not line and self.current_process.poll() is not None:
+                            break
+                        if line:
+                            clean_line = line.strip()
+                            if clean_line:
+                                self.log_signal.emit(f"Demucs: {clean_line}")
+                                
+                    demucs_success = (self.current_process.returncode == 0)
+                except Exception as demucs_err:
+                    self.log_signal.emit(f"Cảnh báo: Không thể khởi chạy Demucs subprocess: {demucs_err}")
+                    demucs_success = False
+                    
+                if self.cancelled:
+                    if os.path.exists(temp_demucs_dir):
+                        try: shutil.rmtree(temp_demucs_dir)
+                        except: pass
+                    break
+                    
+                if not demucs_success:
+                    self.log_signal.emit("Tiếp tục bằng âm thanh gốc do Demucs gặp sự cố.")
+                else:
+                    # Search for output files
+                    vocal_file = None
+                    no_vocal_file = None
+                    for root, dirs, files in os.walk(temp_demucs_dir):
+                        if "vocals.wav" in files:
+                            vocal_file = os.path.join(root, "vocals.wav")
+                        if "no_vocals.wav" in files:
+                            no_vocal_file = os.path.join(root, "no_vocals.wav")
+                            
+                    if vocal_file and no_vocal_file and os.path.exists(vocal_file) and os.path.exists(no_vocal_file):
+                        self.log_signal.emit("Tách giọng nói thành công!")
+                        
+                        input_dir = os.path.dirname(input_file)
+                        input_base = os.path.splitext(os.path.basename(input_file))[0]
+                        
+                        # 1. Convert no_vocals.wav to original format and save in input_dir
+                        codec = get_audio_codec(input_file)
+                        if codec in ["aac", "mp4a"]:
+                            out_ext = "m4a"
+                            acodec = "aac"
+                            acodec_opts = ["-b:a", "192k"]
+                        elif codec in ["mp3", "mp3float"]:
+                            out_ext = "mp3"
+                            acodec = "libmp3lame"
+                            acodec_opts = ["-q:a", "2"]
+                        elif codec == "flac":
+                            out_ext = "flac"
+                            acodec = "flac"
+                            acodec_opts = []
+                        elif codec in ["pcm_s16le", "pcm_s24le", "pcm_f32le", "wav"]:
+                            out_ext = "wav"
+                            acodec = "pcm_s16le"
+                            acodec_opts = []
+                        else:
+                            out_ext = "mp3"
+                            acodec = "libmp3lame"
+                            acodec_opts = ["-q:a", "2"]
+
+                        no_vocals_dest = os.path.join(input_dir, f"{input_base}_no_vocals.{out_ext}")
+                        self.log_signal.emit(f"Đang xuất tệp nhạc nền định dạng {out_ext.upper()}...")
+                        
+                        if os.path.exists(no_vocals_dest):
+                            try: os.remove(no_vocals_dest)
+                            except: pass
+                            
+                        if out_ext == "wav":
+                            try:
+                                shutil.move(no_vocal_file, no_vocals_dest)
+                                self.log_signal.emit(f"Đã lưu tệp không lời tại: {no_vocals_dest}")
+                            except Exception as move_err:
+                                self.log_signal.emit(f"Cảnh báo: Không thể di chuyển tệp không lời: {move_err}")
+                        else:
+                            ffmpeg_novoc_cmd = [
+                                FFMPEG_PATH, "-y", "-i", no_vocal_file,
+                                "-acodec", acodec
+                            ] + acodec_opts + [no_vocals_dest]
+                            
+                            self.current_process = subprocess.Popen(
+                                ffmpeg_novoc_cmd,
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE,
+                                creationflags=CREATION_FLAGS
+                            )
+                            self.current_process.communicate()
+                            
+                            if self.current_process.returncode == 0 and os.path.exists(no_vocals_dest):
+                                self.log_signal.emit(f"Đã lưu tệp không lời tại: {no_vocals_dest}")
+                            else:
+                                fallback_dest = os.path.join(input_dir, f"{input_base}_no_vocals.wav")
+                                if os.path.exists(fallback_dest):
+                                    try: os.remove(fallback_dest)
+                                    except: pass
+                                try:
+                                    shutil.move(no_vocal_file, fallback_dest)
+                                    self.log_signal.emit(f"Cảnh báo: Chuyển đổi nhạc nền thất bại, đã lưu tệp WAV gốc tại: {fallback_dest}")
+                                except Exception as move_err:
+                                    self.log_signal.emit(f"Cảnh báo: Không thể di chuyển tệp không lời: {move_err}")
+                            
+                        # 2. Move vocals.wav to same directory as input_file
+                        vocals_dest = os.path.join(input_dir, f"{input_base}_vocals.wav")
+                        vocals_source_for_convert = vocal_file
+                        try:
+                            if os.path.exists(vocals_dest):
+                                try: os.remove(vocals_dest)
+                                except: pass
+                            shutil.move(vocal_file, vocals_dest)
+                            self.log_signal.emit(f"Đã lưu tệp giọng nói tại: {vocals_dest}")
+                            vocals_source_for_convert = vocals_dest
+                        except Exception as move_err:
+                            self.log_signal.emit(f"Cảnh báo: Không thể di chuyển tệp giọng nói sang thư mục gốc: {move_err}")
+                            
+                        # 3. Re-convert vocals_source_for_convert to 16kHz mono WAV with Enhancement (highpass, lowpass, loudnorm), replacing temp_wav
+                        self.log_signal.emit("Đang lọc nhiễu và tăng cường giọng nói (vocal) cho Whisper...")
+                        temp_vocal_wav = os.path.join(BIN_DIR, f"temp_vocal_{idx}.wav")
+                        if os.path.exists(temp_vocal_wav):
+                            try: os.remove(temp_vocal_wav)
+                            except: pass
+                            
+                        ffmpeg_vocal_cmd = [
+                            FFMPEG_PATH, "-y", "-i", vocals_source_for_convert,
+                            "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
+                            "-af", "highpass=f=80,lowpass=f=8000,agate=threshold=0.02:range=0.1,loudnorm", temp_vocal_wav
+                        ]
+                        
+                        self.current_process = subprocess.Popen(
+                            ffmpeg_vocal_cmd,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            creationflags=CREATION_FLAGS
+                        )
+                        self.current_process.communicate()
+                        
+                        if self.current_process.returncode == 0 and os.path.exists(temp_vocal_wav):
+                            try: os.remove(temp_wav)
+                            except: pass
+                            os.rename(temp_vocal_wav, temp_wav)
+                            self.log_signal.emit("Tăng cường chất lượng giọng nói thành công!")
+                        else:
+                            self.log_signal.emit("Cảnh báo: Tăng cường giọng nói thất bại, dùng tệp âm thanh gốc.")
+                    else:
+                        self.log_signal.emit("Cảnh báo: Không tìm thấy tệp kết quả của Demucs, dùng tệp âm thanh gốc.")
+                        
+                # Cleanup temp demucs dir
+                if os.path.exists(temp_demucs_dir):
+                    try: shutil.rmtree(temp_demucs_dir)
+                    except: pass
+                    
             temp_wav_files.append((input_file, temp_wav))
-            # Conversion progress contributes to first 30%
+            # Conversion/Separation progress contributes to first 30%
             self.progress_signal.emit(int(((idx + 1) * 30) / total_files))
             
         if self.cancelled or not temp_wav_files:
@@ -714,7 +920,11 @@ class TranscribeWorker(QtCore.QObject):
             "-m", model_path,
             "-osrt",
             "-l", lang_code,
-            "-t", str(self.thread_count)
+            "-t", str(self.thread_count),
+            "-bs", "5",
+            "-bo", "5",
+            "-tp", "0.0",
+            "-nf"
         ]
         
         if self.device == "CPU":
@@ -737,7 +947,7 @@ class TranscribeWorker(QtCore.QObject):
             text=True,
             encoding="utf-8",
             errors="ignore",
-            creationflags=creation_flags
+            creationflags=CREATION_FLAGS
         )
         
         current_file_idx = 0
@@ -862,8 +1072,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _build_ui(self):
         self.setWindowTitle("AutoCaption - Whisper Offline Subtitler")
-        self.resize(600, 850)
-        self.setMinimumSize(550, 800)
+        self.resize(600, 930)
+        self.setMinimumSize(550, 880)
 
         central = QtWidgets.QWidget(self)
         self.setCentralWidget(central)
@@ -999,7 +1209,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # 2. Settings Group
         settings_group = QtWidgets.QFrame()
         settings_group.setProperty("class", "GroupFrame")
-        settings_group.setMinimumHeight(330)
+        settings_group.setMinimumHeight(400)
         settings_layout = QtWidgets.QVBoxLayout(settings_group)
         settings_layout.setContentsMargins(20, 20, 20, 20)
         settings_layout.setSpacing(14)
@@ -1013,6 +1223,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._chk_same_folder.setChecked(True)
         self._chk_same_folder.toggled.connect(self._toggle_output_folder)
         settings_layout.addWidget(self._chk_same_folder)
+        
+        self._chk_demucs = QtWidgets.QCheckBox("Tách giọng nói (vocal) bằng Demucs trước khi dịch")
+        self._chk_demucs.setStyleSheet("color: #E5E5E5; font-weight: 500; background: transparent; border: none;")
+        self._chk_demucs.setChecked(False)
+        self._chk_demucs.toggled.connect(self._on_demucs_toggled)
+        settings_layout.addWidget(self._chk_demucs)
         
         # Spacer between checkbox and form
         settings_layout.addSpacing(6)
@@ -1073,6 +1289,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self._cmb_threads.setCurrentText(str(min(4, cpu_cores)))
         settings_form.addRow(self._lbl_threads, self._cmb_threads)
 
+        # Demucs model row
+        self._lbl_demucs_model = QtWidgets.QLabel("Mức tách Demucs:")
+        self._lbl_demucs_model.setStyleSheet("background: transparent; border: none; color: #A3A3A3;")
+        self._cmb_demucs_model = QtWidgets.QComboBox()
+        self._cmb_demucs_model.addItems([
+            "htdemucs (Tiêu chuẩn - Khuyên dùng)",
+            "htdemucs_ft (Chất lượng cao - Chậm)",
+            "mdx_extra_q (Nhanh - Tiết kiệm RAM)"
+        ])
+        settings_form.addRow(self._lbl_demucs_model, self._cmb_demucs_model)
+
         settings_layout.addLayout(settings_form)
 
         parent_layout.addWidget(settings_group)
@@ -1127,6 +1354,10 @@ class MainWindow(QtWidgets.QMainWindow):
         is_same = self._chk_same_folder.isChecked()
         self._output_edit.setEnabled(not is_same)
         self._btn_browse_output.setEnabled(not is_same)
+
+    def _on_demucs_toggled(self, checked):
+        self._lbl_demucs_model.setEnabled(checked)
+        self._cmb_demucs_model.setEnabled(checked)
 
     def _build_log(self, parent_layout):
         label = QtWidgets.QLabel("Nhật ký & Tiến độ chạy")
@@ -1187,6 +1418,7 @@ class MainWindow(QtWidgets.QMainWindow):
         
         self._output_edit.setText(settings.value("output_folder", ""))
         self._chk_same_folder.setChecked(settings.value("save_same_folder", True, type=bool))
+        self._chk_demucs.setChecked(settings.value("demucs_enabled", False, type=bool))
         
         lang = settings.value("language", "Tự động phát hiện (Auto)")
         self._cmb_lang.setCurrentText(lang)
@@ -1207,6 +1439,10 @@ class MainWindow(QtWidgets.QMainWindow):
         threads = int(settings.value("threads", min(4, os.cpu_count() or 4)))
         self._cmb_threads.setCurrentText(str(threads))
 
+        demucs_model = settings.value("demucs_model", "htdemucs (Tiêu chuẩn - Khuyên dùng)")
+        self._cmb_demucs_model.setCurrentText(str(demucs_model))
+        self._on_demucs_toggled(self._chk_demucs.isChecked())
+
         self._input_files_list.clear()
         input_files = settings.value("input_files_list", [])
         if isinstance(input_files, str):
@@ -1220,13 +1456,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._log_panel.setVisible(False)
         self.setMinimumWidth(550)
-        self.resize(600, 850)
+        self.resize(600, 930)
         self._toggle_output_folder()
 
     def _save_settings(self):
         settings = QtCore.QSettings("WhisperSubtitler", "Settings")
         settings.setValue("output_folder", self._output_edit.text())
         settings.setValue("save_same_folder", self._chk_same_folder.isChecked())
+        settings.setValue("demucs_enabled", self._chk_demucs.isChecked())
+        settings.setValue("demucs_model", self._cmb_demucs_model.currentText())
         settings.setValue("language", self._cmb_lang.currentText())
         settings.setValue("device_index", self._cmb_device.currentIndex())
         settings.setValue("threads", int(self._cmb_threads.currentText()))
@@ -1330,6 +1568,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self._log_text.setPlainText("Bắt đầu xử lý...")
 
         device_val = "CPU" if self._cmb_device.currentIndex() == 0 else "GPU"
+        
+        demucs_combo_text = self._cmb_demucs_model.currentText()
+        if "htdemucs_ft" in demucs_combo_text:
+            demucs_model_name = "htdemucs_ft"
+        elif "mdx_extra_q" in demucs_combo_text:
+            demucs_model_name = "mdx_extra_q"
+        else:
+            demucs_model_name = "htdemucs"
+
         self._worker = TranscribeWorker(
             self._input_files_list, 
             self._output_edit.text(), 
@@ -1337,19 +1584,17 @@ class MainWindow(QtWidgets.QMainWindow):
             model_selected, 
             self._cmb_lang.currentText(), 
             int(self._cmb_threads.currentText()),
-            device_val
+            device_val,
+            self._chk_demucs.isChecked(),
+            demucs_model_name
         )
-        self._worker_thread = QtCore.QThread()
-        self._worker.moveToThread(self._worker_thread)
-
-        self._worker_thread.started.connect(self._worker.run)
         self._worker.log_signal.connect(self._on_log)
         self._worker.status_signal.connect(self._on_status)
         self._worker.progress_signal.connect(self._on_progress)
         self._worker.finished_signal.connect(self._on_finished)
 
         self._status_label.setText("Đang khởi tạo tiến trình dịch...")
-        self._worker_thread.start()
+        self._worker.start()
 
     def _on_cancel(self):
         self._status_label.setText("Đang dừng...")
@@ -1370,9 +1615,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._progress.setValue(percent)
 
     def _on_finished(self, success, saved_paths, failed_files):
-        if self._worker_thread:
-            self._worker_thread.quit()
-            self._worker_thread.wait()
+        if self._worker:
+            self._worker.quit()
+            self._worker.wait()
 
         self._running = False
         self._btn_start.setEnabled(True)
@@ -1422,4 +1667,35 @@ def main():
 
 
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "--demucs-worker":
+        try:
+            import torch
+            import torchaudio
+            import soundfile as sf
+            
+            def custom_load(uri, *args, **kwargs):
+                data, samplerate = sf.read(uri, dtype='float32')
+                tensor = torch.from_numpy(data)
+                if len(tensor.shape) == 1:
+                    tensor = tensor.unsqueeze(0)
+                else:
+                    tensor = tensor.t()
+                return tensor, samplerate
+
+            def custom_save(uri, src, sample_rate, *args, **kwargs):
+                data = src.t().cpu().numpy()
+                sf.write(uri, data, sample_rate)
+            
+            torchaudio.load = custom_load
+            torchaudio.save = custom_save
+            
+            from demucs.separate import main as demucs_main
+            sys.argv = ["demucs", "-n", sys.argv[2], "--two-stems", "vocals", "-o", sys.argv[3], sys.argv[4]]
+            demucs_main()
+            sys.exit(0)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
+            
     main()
