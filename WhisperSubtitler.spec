@@ -5,14 +5,14 @@ a = Analysis(
     ['app.py'],
     pathex=[],
     binaries=[],
-    datas=[('AutoCaption.css', '.')] + collect_data_files('demucs'),
+    datas=[('src/assets/AutoCaption.css', 'src/assets')] + collect_data_files('demucs'),
     hiddenimports=['numpy', 'numpy.core', 'numpy.core.multiarray', 'numpy._core'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['sqlite3', 'win32com', 'pythonwin', 'google', 'markupsafe', 'jinja2', 'fsspec'],
+    excludes=['sqlite3', 'win32com', 'pythonwin', 'google', 'markupsafe', 'jinja2', 'fsspec', 'sympy', 'mpmath', 'networkx', 'matplotlib'],
     noarchive=False,
-    optimize=0,
+    optimize=2,
 )
 pyz = PYZ(a.pure)
 
