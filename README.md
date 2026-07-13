@@ -57,6 +57,11 @@ Cách này giúp bạn chạy trực tiếp ứng dụng bằng file `.exe` duy 
 
 1. **Biên dịch thành tệp thực thi**:
    * **Cài đặt Python**: Máy tính biên dịch cần cài đặt Python (khuyên dùng Python 3.11, xem hướng dẫn chi tiết cách tải và tích chọn "Add Python to PATH" ở Cách 2).
+   * Cài đặt các thư viện phụ thuộc:
+     ```bash
+     python -m pip install --upgrade pip
+     pip install -r requirements.txt
+     ```
    * Cài đặt thư viện PyInstaller:
      ```bash
      pip install pyinstaller
