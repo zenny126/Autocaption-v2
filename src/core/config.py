@@ -38,4 +38,4 @@ MODEL_URLS = {
 os.makedirs(BIN_DIR, exist_ok=True)
 os.makedirs(MODELS_DIR, exist_ok=True)
 
-SUPPORTED_EXTS = {".mp4", ".mkv", ".avi", ".mp3", ".wav", ".m4a", ".flac", ".mov", ".ogg", ".webm"}
+SUPPORTED_EXTS = {".mp4", ".mkv", ".avi", ".mp3", ".wav", ".m4a", ".flac", ".mov", ".ogg", ".webm", ".srt"}
