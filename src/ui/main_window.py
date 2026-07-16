@@ -1,16 +1,16 @@
 import os
 from PySide6 import QtWidgets, QtCore, QtGui
-from src.core.config import MODELS_DIR, SUPPORTED_EXTS
+from src.core.config import MODELS_DIR
 from src.core.utils import load_stylesheet, HAS_CUDA, CUDA_VERSION, open_directory
 from src.ui.components import CardFrame, DropZoneFrame, SuccessPopup
 from src.ui.downloader import DownloaderDialog
 from src.workers.transcribe_worker import TranscribeWorker
-from src.workers.tts_worker import TTSWorker
 
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
         self._running = False
+        self._worker_thread = None
         self._worker = None
         self._input_files_list = []
 
@@ -72,67 +72,14 @@ class MainWindow(QtWidgets.QMainWindow):
         content = QtWidgets.QHBoxLayout()
         content.setSpacing(16)
 
-        # Left panel (Form Card with QTabWidget)
+        # Left panel (Form)
         left_card = QtWidgets.QFrame(self)
         left_card.setObjectName("LeftCard")
         left_layout = QtWidgets.QVBoxLayout(left_card)
         left_layout.setContentsMargins(16, 16, 16, 16)
         left_layout.setSpacing(12)
 
-        # QTabWidget for Transcribe and TTS forms
-        self._tab_widget = QtWidgets.QTabWidget()
-        self._tab_widget.setObjectName("MainTabWidget")
-        
-        # Tab 1: Transcribe Widget
-        self._tab_transcribe = QtWidgets.QWidget()
-        tab_transcribe_layout = QtWidgets.QVBoxLayout(self._tab_transcribe)
-        tab_transcribe_layout.setContentsMargins(0, 4, 0, 0)
-        tab_transcribe_layout.setSpacing(12)
-        self._build_transcribe_form(tab_transcribe_layout)
-        self._tab_widget.addTab(self._tab_transcribe, "Tạo phụ đề")
-
-        # Tab 2: TTS Widget
-        self._tab_tts = QtWidgets.QWidget()
-        tab_tts_layout = QtWidgets.QVBoxLayout(self._tab_tts)
-        tab_tts_layout.setContentsMargins(0, 4, 0, 0)
-        tab_tts_layout.setSpacing(12)
-        self._build_tts_form(tab_tts_layout)
-        self._tab_widget.addTab(self._tab_tts, "SRT -> Giọng nói (TTS)")
-
-        self._tab_widget.currentChanged.connect(self._on_tab_changed)
-        left_layout.addWidget(self._tab_widget, 1)
-
-        # Common Actions below Tab widget
-        self._progress = QtWidgets.QProgressBar()
-        self._progress.setRange(0, 100)
-        self._progress.setValue(0)
-        self._progress.setFixedHeight(24)
-        left_layout.addWidget(self._progress)
-        
-        btn_layout = QtWidgets.QHBoxLayout()
-        btn_layout.setSpacing(12)
-        
-        self._btn_start = QtWidgets.QPushButton("BẮT ĐẦU TẠO PHỤ ĐỀ")
-        self._btn_start.setObjectName("StartBtn")
-        self._btn_start.setMinimumHeight(48)
-        self._add_glow(self._btn_start, color="#7c4dff", radius=20)
-        
-        self._btn_cancel = QtWidgets.QPushButton("Hủy bỏ")
-        self._btn_cancel.setObjectName("CancelBtn")
-        self._btn_cancel.setProperty("class", "NormalBtn")
-        self._btn_cancel.setMinimumHeight(48)
-        self._btn_cancel.setEnabled(False)
-        
-        self._btn_open = QtWidgets.QPushButton("Mở thư mục")
-        self._btn_open.setObjectName("OpenFolderBtn")
-        self._btn_open.setProperty("class", "NormalBtn")
-        self._btn_open.setMinimumHeight(48)
-        
-        btn_layout.addWidget(self._btn_start, 2)
-        btn_layout.addWidget(self._btn_cancel, 1)
-        btn_layout.addWidget(self._btn_open, 1)
-        left_layout.addLayout(btn_layout)
-
+        self._build_form(left_layout)
         content.addWidget(left_card, 1)
 
         # Right panel (Log)
@@ -157,19 +104,7 @@ class MainWindow(QtWidgets.QMainWindow):
         status_layout.addWidget(self._status_label)
         main_layout.addWidget(status)
 
-        # Connect actions
-        self._btn_start.clicked.connect(self._on_start)
-        self._btn_cancel.clicked.connect(self._on_cancel)
-        self._btn_open.clicked.connect(self._open_output_folder)
-
-    def _add_glow(self, widget, color="#FFFFFF", radius=15):
-        effect = QtWidgets.QGraphicsDropShadowEffect()
-        effect.setBlurRadius(radius)
-        effect.setColor(QtGui.QColor(color))
-        effect.setOffset(0, 0)
-        widget.setGraphicsEffect(effect)
-
-    def _build_transcribe_form(self, parent_layout):
+    def _build_form(self, parent_layout):
         title_style = """
             color: #A3A3A3;
             font-weight: bold;
@@ -177,6 +112,13 @@ class MainWindow(QtWidgets.QMainWindow):
             border: none;
             background: transparent;
         """
+        
+        def add_glow(widget, color="#FFFFFF", radius=15):
+            effect = QtWidgets.QGraphicsDropShadowEffect()
+            effect.setBlurRadius(radius)
+            effect.setColor(QtGui.QColor(color))
+            effect.setOffset(0, 0)
+            widget.setGraphicsEffect(effect)
 
         # 1. Input Media Group
         input_group = QtWidgets.QFrame()
@@ -241,7 +183,7 @@ class MainWindow(QtWidgets.QMainWindow):
         settings_layout.setContentsMargins(20, 20, 20, 20)
         settings_layout.setSpacing(14)
 
-        lbl_settings_title = QtWidgets.QLabel("2. Cấu hình tạo phụ đề")
+        lbl_settings_title = QtWidgets.QLabel("2. Cấu hình")
         lbl_settings_title.setStyleSheet(title_style)
         settings_layout.addWidget(lbl_settings_title)
 
@@ -257,11 +199,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._chk_demucs.toggled.connect(self._on_demucs_toggled)
         settings_layout.addWidget(self._chk_demucs)
         
+        # Spacer between checkbox and form
         settings_layout.addSpacing(6)
 
-        # Form Layout
+        # Form Layout for perfect alignment and spacing
         settings_form = QtWidgets.QFormLayout()
-        settings_form.setVerticalSpacing(18)
+        settings_form.setVerticalSpacing(18)  # Spaced out vertical rows (18px)
         settings_form.setHorizontalSpacing(15)
         settings_form.setContentsMargins(0, 5, 0, 5)
 
@@ -276,7 +219,7 @@ class MainWindow(QtWidgets.QMainWindow):
         output_row.addWidget(self._btn_browse_output, 0)
         settings_form.addRow(self._lbl_output, output_row)
 
-        # Model row
+        # Model row with refresh and download options
         model_row = QtWidgets.QHBoxLayout()
         self._lbl_model = QtWidgets.QLabel("Mô hình:")
         self._lbl_model.setStyleSheet("background: transparent; border: none; color: #A3A3A3;")
@@ -327,120 +270,52 @@ class MainWindow(QtWidgets.QMainWindow):
         settings_form.addRow(self._lbl_demucs_model, self._cmb_demucs_model)
 
         settings_layout.addLayout(settings_form)
-        parent_layout.addWidget(settings_group)
 
-        # Connect tab-specific actions
+        parent_layout.addWidget(settings_group)
+        parent_layout.addSpacing(16)
+
+        # 3. Actions
+        self._progress = QtWidgets.QProgressBar()
+        self._progress.setRange(0, 100)
+        self._progress.setValue(0)
+        self._progress.setFixedHeight(24)
+        parent_layout.addWidget(self._progress)
+        
+        btn_layout = QtWidgets.QHBoxLayout()
+        btn_layout.setSpacing(12)
+        self._btn_start = QtWidgets.QPushButton("BẮT ĐẦU TẠO PHỤ ĐỀ")
+        self._btn_start.setObjectName("StartBtn")
+        self._btn_start.setMinimumHeight(48)
+        add_glow(self._btn_start, color="#7c4dff", radius=20)
+        
+        self._btn_cancel = QtWidgets.QPushButton("Hủy bỏ")
+        self._btn_cancel.setObjectName("CancelBtn")
+        self._btn_cancel.setProperty("class", "NormalBtn")
+        self._btn_cancel.setMinimumHeight(48)
+        self._btn_cancel.setEnabled(False)
+        
+        self._btn_open = QtWidgets.QPushButton("Mở thư mục")
+        self._btn_open.setObjectName("OpenFolderBtn")
+        self._btn_open.setProperty("class", "NormalBtn")
+        self._btn_open.setMinimumHeight(48)
+        
+        btn_layout.addWidget(self._btn_start, 2)
+        btn_layout.addWidget(self._btn_cancel, 1)
+        btn_layout.addWidget(self._btn_open, 1)
+        parent_layout.addLayout(btn_layout)
+        parent_layout.addStretch()
+
+        # Connect actions
         self._btn_browse_input.clicked.connect(self._browse_input)
         self._btn_clear_input.clicked.connect(self._clear_input_list)
         self._btn_browse_output.clicked.connect(self._browse_output)
         self._btn_refresh_models.clicked.connect(self._refresh_models)
         self._btn_dl_more.clicked.connect(self._open_downloader_for_models)
+        self._btn_start.clicked.connect(self._on_start)
+        self._btn_cancel.clicked.connect(self._on_cancel)
+        self._btn_open.clicked.connect(self._open_output_folder)
         
         self._toggle_output_folder()
-        self._on_demucs_toggled(self._chk_demucs.isChecked())
-
-    def _build_tts_form(self, parent_layout):
-        title_style = """
-            color: #A3A3A3;
-            font-weight: bold;
-            font-size: 14px;
-            border: none;
-            background: transparent;
-        """
-
-        # 1. Inputs Group
-        inputs_group = QtWidgets.QFrame()
-        inputs_group.setProperty("class", "GroupFrame")
-        inputs_layout = QtWidgets.QVBoxLayout(inputs_group)
-        inputs_layout.setContentsMargins(20, 20, 20, 20)
-        inputs_layout.setSpacing(12)
-
-        lbl_inputs_title = QtWidgets.QLabel("1. Đầu vào (SRT & Giọng mẫu)")
-        lbl_inputs_title.setStyleSheet(title_style)
-        inputs_layout.addWidget(lbl_inputs_title)
-
-        # SRT File Selector
-        srt_label = QtWidgets.QLabel("Tệp phụ đề SRT gốc:")
-        srt_label.setStyleSheet("color: #E5E5E5; font-weight: 500;")
-        inputs_layout.addWidget(srt_label)
-        
-        srt_row = QtWidgets.QHBoxLayout()
-        self._tts_srt_edit = QtWidgets.QLineEdit()
-        self._tts_srt_edit.setPlaceholderText("Kéo & thả hoặc Chọn tệp .srt...")
-        self._btn_browse_srt = QtWidgets.QPushButton("Chọn...")
-        self._btn_browse_srt.setProperty("class", "NormalBtn")
-        srt_row.addWidget(self._tts_srt_edit, 1)
-        srt_row.addWidget(self._btn_browse_srt, 0)
-        inputs_layout.addLayout(srt_row)
-
-        # Voice Ref Selector
-        ref_label = QtWidgets.QLabel("Tệp âm thanh giọng mẫu để clone (6-10 giây):")
-        ref_label.setStyleSheet("color: #E5E5E5; font-weight: 500;")
-        inputs_layout.addWidget(ref_label)
-        
-        ref_row = QtWidgets.QHBoxLayout()
-        self._tts_ref_edit = QtWidgets.QLineEdit()
-        self._tts_ref_edit.setPlaceholderText("Kéo & thả hoặc Chọn file âm thanh giọng mẫu...")
-        self._btn_browse_ref = QtWidgets.QPushButton("Chọn...")
-        self._btn_browse_ref.setProperty("class", "NormalBtn")
-        ref_row.addWidget(self._tts_ref_edit, 1)
-        ref_row.addWidget(self._btn_browse_ref, 0)
-        inputs_layout.addLayout(ref_row)
-
-        parent_layout.addWidget(inputs_group)
-
-        # 2. Config Group
-        config_group = QtWidgets.QFrame()
-        config_group.setProperty("class", "GroupFrame")
-        config_layout = QtWidgets.QVBoxLayout(config_group)
-        config_layout.setContentsMargins(20, 20, 20, 20)
-        config_layout.setSpacing(14)
-
-        lbl_config_title = QtWidgets.QLabel("2. Cấu hình thuyết minh")
-        lbl_config_title.setStyleSheet(title_style)
-        config_layout.addWidget(lbl_config_title)
-
-        self._chk_tts_auto_speed = QtWidgets.QCheckBox("Tự động tăng tốc độ thuyết minh để khớp với phụ đề")
-        self._chk_tts_auto_speed.setStyleSheet("color: #E5E5E5; font-weight: 500; background: transparent; border: none;")
-        self._chk_tts_auto_speed.setChecked(True)
-        config_layout.addWidget(self._chk_tts_auto_speed)
-
-        config_form = QtWidgets.QFormLayout()
-        config_form.setVerticalSpacing(18)
-        config_form.setHorizontalSpacing(15)
-        config_form.setContentsMargins(0, 5, 0, 5)
-
-        # Hardware choice
-        self._lbl_tts_device = QtWidgets.QLabel("Phần cứng chạy:")
-        self._lbl_tts_device.setStyleSheet("background: transparent; border: none; color: #A3A3A3;")
-        self._cmb_tts_device = QtWidgets.QComboBox()
-        self._cmb_tts_device.addItems(["CPU (Chạy an toàn nhưng chậm)", "GPU (CUDA - Chạy nhanh)"])
-        config_form.addRow(self._lbl_tts_device, self._cmb_tts_device)
-
-        # Output folder row
-        output_row = QtWidgets.QHBoxLayout()
-        self._lbl_tts_output = QtWidgets.QLabel("Thư mục lưu thuyết minh:")
-        self._lbl_tts_output.setStyleSheet("background: transparent; border: none; color: #A3A3A3;")
-        self._tts_output_edit = QtWidgets.QLineEdit()
-        self._btn_browse_tts_output = QtWidgets.QPushButton("Chọn...")
-        self._btn_browse_tts_output.setProperty("class", "NormalBtn")
-        output_row.addWidget(self._tts_output_edit, 1)
-        output_row.addWidget(self._btn_browse_tts_output, 0)
-        config_form.addRow(self._lbl_tts_output, output_row)
-
-        config_layout.addLayout(config_form)
-        parent_layout.addWidget(config_group)
-
-        # Connect TTS signals
-        self._btn_browse_srt.clicked.connect(self._browse_srt)
-        self._btn_browse_ref.clicked.connect(self._browse_ref)
-        self._btn_browse_tts_output.clicked.connect(self._browse_tts_output)
-
-    def _on_tab_changed(self, index):
-        if index == 0:
-            self._btn_start.setText("BẮT ĐẦU TẠO PHỤ ĐỀ")
-        else:
-            self._btn_start.setText("BẮT ĐẦU THUYẾT MINH")
 
     def _toggle_output_folder(self):
         is_same = self._chk_same_folder.isChecked()
@@ -533,6 +408,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         demucs_model = settings.value("demucs_model", "htdemucs (Tiêu chuẩn - Khuyên dùng)")
         self._cmb_demucs_model.setCurrentText(str(demucs_model))
+        self._on_demucs_toggled(self._chk_demucs.isChecked())
 
         self._input_files_list.clear()
         input_files = settings.value("input_files_list", [])
@@ -545,28 +421,10 @@ class MainWindow(QtWidgets.QMainWindow):
                     self._add_input_file(path)
         self._update_drop_zone_visuals()
 
-        # TTS settings load
-        self._tts_srt_edit.setText(settings.value("tts_srt_path", ""))
-        self._tts_ref_edit.setText(settings.value("tts_ref_path", ""))
-        self._chk_tts_auto_speed.setChecked(settings.value("tts_auto_speed", True, type=bool))
-        self._tts_output_edit.setText(settings.value("tts_output_dir", default_dir))
-        
-        default_tts_idx = 1 if HAS_CUDA else 0
-        tts_device_idx = int(settings.value("tts_device_index", default_tts_idx))
-        if not HAS_CUDA:
-            tts_device_idx = 0
-        self._cmb_tts_device.setCurrentIndex(tts_device_idx)
-        if HAS_CUDA:
-            self._cmb_tts_device.setItemText(1, f"GPU (CUDA {CUDA_VERSION}.x)")
-        else:
-            self._cmb_tts_device.setItemText(1, "GPU (CUDA) - Not Available")
-            self._cmb_tts_device.model().item(1).setEnabled(False)
-
         self._log_panel.setVisible(False)
         self.setMinimumWidth(550)
         self.resize(600, 930)
         self._toggle_output_folder()
-        self._on_demucs_toggled(self._chk_demucs.isChecked())
 
     def _save_settings(self):
         settings = QtCore.QSettings("WhisperSubtitler", "Settings")
@@ -592,13 +450,6 @@ class MainWindow(QtWidgets.QMainWindow):
         settings.setValue("last_input_dir", self._last_input_dir)
         settings.setValue("last_output_dir", self._last_output_dir)
 
-        # TTS settings save
-        settings.setValue("tts_srt_path", self._tts_srt_edit.text())
-        settings.setValue("tts_ref_path", self._tts_ref_edit.text())
-        settings.setValue("tts_auto_speed", self._chk_tts_auto_speed.isChecked())
-        settings.setValue("tts_device_index", self._cmb_tts_device.currentIndex())
-        settings.setValue("tts_output_dir", self._tts_output_edit.text())
-
     def _toggle_log_panel(self):
         show = not self._log_panel.isVisible()
         self._log_panel.setVisible(show)
@@ -618,18 +469,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._save_settings()
 
     def _on_files_dropped(self, file_paths):
-        if self._tab_widget.currentIndex() == 0:
-            self._add_files_and_update(file_paths)
-        else:
-            # Handle drops for Tab 2
-            for path in file_paths:
-                ext = os.path.splitext(path)[1].lower()
-                if ext == ".srt":
-                    self._tts_srt_edit.setText(path)
-                    if not self._tts_output_edit.text():
-                        self._tts_output_edit.setText(os.path.dirname(path))
-                elif ext in [".wav", ".mp3", ".m4a", ".flac", ".ogg"]:
-                    self._tts_ref_edit.setText(path)
+        self._add_files_and_update(file_paths)
 
     def _browse_input(self):
         paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
@@ -644,32 +484,6 @@ class MainWindow(QtWidgets.QMainWindow):
         if path:
             self._output_edit.setText(path)
             self._last_output_dir = path
-            self._save_settings()
-
-    def _browse_srt(self):
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, "Chọn tệp phụ đề SRT", self._last_input_dir, 
-            "Subtitle Files (*.srt)"
-        )
-        if path:
-            self._tts_srt_edit.setText(path)
-            if not self._tts_output_edit.text():
-                self._tts_output_edit.setText(os.path.dirname(path))
-            self._save_settings()
-
-    def _browse_ref(self):
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, "Chọn tệp âm thanh giọng mẫu", self._last_input_dir, 
-            "Audio Files (*.wav *.mp3 *.m4a *.flac *.ogg)"
-        )
-        if path:
-            self._tts_ref_edit.setText(path)
-            self._save_settings()
-
-    def _browse_tts_output(self):
-        path = QtWidgets.QFileDialog.getExistingDirectory(self, "Chọn thư mục lưu thuyết minh", self._last_output_dir)
-        if path:
-            self._tts_output_edit.setText(path)
             self._save_settings()
 
     def _refresh_models(self):
@@ -697,102 +511,57 @@ class MainWindow(QtWidgets.QMainWindow):
             self._refresh_models()
 
     def _on_start(self):
+        if not self._input_files_list:
+            QtWidgets.QMessageBox.warning(self, "Lỗi", "Vui lòng chọn tệp âm thanh hoặc video đầu vào!")
+            return
+
+        if not self._chk_same_folder.isChecked() and not self._output_edit.text():
+            QtWidgets.QMessageBox.warning(self, "Lỗi", "Vui lòng chọn thư mục lưu phụ đề đầu ra!")
+            return
+
+        model_selected = self._cmb_model.currentText()
+        if not model_selected or model_selected.startswith("Chưa có model"):
+            QtWidgets.QMessageBox.warning(self, "Lỗi", "Vui lòng chọn hoặc tải mô hình Whisper trước!")
+            return
+
         self._save_settings()
+        self._running = True
+        self._btn_start.setEnabled(False)
+        self._btn_cancel.setEnabled(True)
+        self._progress.setValue(0)
         
-        if self._tab_widget.currentIndex() == 0:
-            # 1. Transcribe Mode
-            if not self._input_files_list:
-                QtWidgets.QMessageBox.warning(self, "Lỗi", "Vui lòng chọn tệp âm thanh hoặc video đầu vào!")
-                return
+        # Clear log panel
+        self._log_text.clear()
+        self._log_text.setPlainText("Bắt đầu xử lý...")
 
-            if not self._chk_same_folder.isChecked() and not self._output_edit.text():
-                QtWidgets.QMessageBox.warning(self, "Lỗi", "Vui lòng chọn thư mục lưu phụ đề đầu ra!")
-                return
-
-            model_selected = self._cmb_model.currentText()
-            if not model_selected or model_selected.startswith("Chưa có model"):
-                QtWidgets.QMessageBox.warning(self, "Lỗi", "Vui lòng chọn hoặc tải mô hình Whisper trước!")
-                return
-
-            self._running = True
-            self._btn_start.setEnabled(False)
-            self._btn_cancel.setEnabled(True)
-            self._progress.setValue(0)
-            
-            self._log_text.clear()
-            self._log_text.setPlainText("Bắt đầu xử lý dịch...")
-
-            device_val = "CPU" if self._cmb_device.currentIndex() == 0 else "GPU"
-            
-            demucs_combo_text = self._cmb_demucs_model.currentText()
-            if "htdemucs_ft" in demucs_combo_text:
-                demucs_model_name = "htdemucs_ft"
-            elif "mdx_extra_q" in demucs_combo_text:
-                demucs_model_name = "mdx_extra_q"
-            else:
-                demucs_model_name = "htdemucs"
-
-            self._worker = TranscribeWorker(
-                self._input_files_list, 
-                self._output_edit.text(), 
-                self._chk_same_folder.isChecked(), 
-                model_selected, 
-                self._cmb_lang.currentText(), 
-                int(self._cmb_threads.currentText()),
-                device_val,
-                self._chk_demucs.isChecked(),
-                demucs_model_name
-            )
-            self._worker.log_signal.connect(self._on_log)
-            self._worker.status_signal.connect(self._on_status)
-            self._worker.progress_signal.connect(self._on_progress)
-            self._worker.finished_signal.connect(self._on_finished)
-
-            self._status_label.setText("Đang khởi tạo tiến trình dịch...")
-            self._worker.start()
-
+        device_val = "CPU" if self._cmb_device.currentIndex() == 0 else "GPU"
+        
+        demucs_combo_text = self._cmb_demucs_model.currentText()
+        if "htdemucs_ft" in demucs_combo_text:
+            demucs_model_name = "htdemucs_ft"
+        elif "mdx_extra_q" in demucs_combo_text:
+            demucs_model_name = "mdx_extra_q"
         else:
-            # 2. TTS Thuyết Minh Mode
-            srt_path = self._tts_srt_edit.text()
-            ref_path = self._tts_ref_edit.text()
-            output_dir = self._tts_output_edit.text()
+            demucs_model_name = "htdemucs"
 
-            if not srt_path or not os.path.exists(srt_path):
-                QtWidgets.QMessageBox.warning(self, "Lỗi", "Vui lòng chọn tệp phụ đề SRT hợp lệ!")
-                return
+        self._worker = TranscribeWorker(
+            self._input_files_list, 
+            self._output_edit.text(), 
+            self._chk_same_folder.isChecked(), 
+            model_selected, 
+            self._cmb_lang.currentText(), 
+            int(self._cmb_threads.currentText()),
+            device_val,
+            self._chk_demucs.isChecked(),
+            demucs_model_name
+        )
+        self._worker.log_signal.connect(self._on_log)
+        self._worker.status_signal.connect(self._on_status)
+        self._worker.progress_signal.connect(self._on_progress)
+        self._worker.finished_signal.connect(self._on_finished)
 
-            if not ref_path or not os.path.exists(ref_path):
-                QtWidgets.QMessageBox.warning(self, "Lỗi", "Vui lòng chọn tệp ghi âm giọng mẫu hợp lệ để clone!")
-                return
-
-            if not output_dir or not os.path.exists(output_dir):
-                QtWidgets.QMessageBox.warning(self, "Lỗi", "Vui lòng chọn thư mục lưu thuyết minh hợp lệ!")
-                return
-
-            self._running = True
-            self._btn_start.setEnabled(False)
-            self._btn_cancel.setEnabled(True)
-            self._progress.setValue(0)
-            
-            self._log_text.clear()
-            self._log_text.setPlainText("Bắt đầu xử lý thuyết minh...")
-
-            device_val = "CPU" if self._cmb_tts_device.currentIndex() == 0 else "GPU"
-
-            self._worker = TTSWorker(
-                srt_path,
-                ref_path,
-                output_dir,
-                device=device_val,
-                auto_speed=self._chk_tts_auto_speed.isChecked()
-            )
-            self._worker.log_signal.connect(self._on_log)
-            self._worker.status_signal.connect(self._on_status)
-            self._worker.progress_signal.connect(self._on_progress)
-            self._worker.finished_signal.connect(self._on_finished)
-
-            self._status_label.setText("Đang khởi tạo tiến trình thuyết minh...")
-            self._worker.start()
+        self._status_label.setText("Đang khởi tạo tiến trình dịch...")
+        self._worker.start()
 
     def _on_cancel(self):
         self._status_label.setText("Đang dừng...")
@@ -812,7 +581,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_progress(self, percent):
         self._progress.setValue(percent)
 
-    def _on_finished(self, success, saved_paths, failed_files=None):
+    def _on_finished(self, success, saved_paths, failed_files):
         if self._worker:
             self._worker.quit()
             self._worker.wait()
@@ -820,29 +589,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self._running = False
         self._btn_start.setEnabled(True)
         self._btn_cancel.setEnabled(False)
+
         self._worker = None
+        self._worker_thread = None
 
         if success:
-            self._status_label.setText("Hoàn tất xử lý!")
-            if self._tab_widget.currentIndex() == 0:
-                popup = SuccessPopup(saved_paths, failed_files or [], self)
-                popup.exec()
-            else:
-                # For TTS mode: saved_paths is the generated file string
-                popup = SuccessPopup([saved_paths], [], self)
-                popup.exec()
+            self._status_label.setText("Hoàn tất tạo phụ đề!")
+            popup = SuccessPopup(saved_paths, failed_files, self)
+            popup.exec()
         else:
             self._status_label.setText("Đã hủy hoặc xảy ra lỗi.")
             QtWidgets.QMessageBox.warning(self, "Thông tin", "Tiến trình đã được dừng hoặc xảy ra lỗi.")
 
     def _open_output_folder(self):
-        if self._tab_widget.currentIndex() == 0:
-            if self._chk_same_folder.isChecked() and self._input_files_list:
-                open_directory(os.path.dirname(self._input_files_list[0]))
-            else:
-                open_directory(self._output_edit.text())
+        if self._chk_same_folder.isChecked() and self._input_files_list:
+            open_directory(os.path.dirname(self._input_files_list[0]))
         else:
-            open_directory(self._tts_output_edit.text())
+            open_directory(self._output_edit.text())
 
     def closeEvent(self, event):
         self._save_settings()

@@ -346,7 +346,8 @@ class TranscribeWorker(QtCore.QThread):
             "-bs", "5",
             "-bo", "5",
             "-tp", "0.0",
-            "-nf"
+            "-nf",
+            "-mc", "0"
         ]
         
         if use_vad:
@@ -434,6 +435,60 @@ class TranscribeWorker(QtCore.QThread):
                         break
                         
                 if found_srt:
+                    try:
+                        import re
+                        base_name_only = os.path.splitext(filename)[0]
+                        input_dir = os.path.dirname(input_file)
+                        downloads_dir = os.path.expanduser(r"~\Downloads")
+                        
+                        # Tìm file lời nhạc tương ứng
+                        lyric_txt = None
+                        candidates_txt = [
+                            os.path.join(input_dir, f"{base_name_only}.txt"),
+                            os.path.join(downloads_dir, f"{base_name_only}.txt"),
+                        ]
+                        for c in candidates_txt:
+                            if os.path.exists(c):
+                                lyric_txt = c
+                                break
+                                
+                        lyrics_list = None
+                        if lyric_txt:
+                            self.log_signal.emit(f"Đối chiếu: Phát hiện file lời nhạc tại: {lyric_txt}")
+                            with open(lyric_txt, 'r', encoding='utf-8', errors='ignore') as f:
+                                lyrics_list = [l.strip() for l in f.readlines() if l.strip()]
+                        else:
+                            # Tự động tìm trong cơ sở dữ liệu lời nhạc nhúng sẵn
+                            try:
+                                from run_local_transcribe import get_stored_lyrics
+                                stored_lyr, matched_key = get_stored_lyrics(base_name_only)
+                                if stored_lyr:
+                                    self.log_signal.emit(f"Đối chiếu: Tự động sử dụng lời chuẩn từ cơ sở dữ liệu cho '{matched_key}'.")
+                                    lyrics_list = stored_lyr
+                            except Exception as import_err:
+                                self.log_signal.emit(f"Cảnh báo: Không thể tải từ cơ sở dữ liệu lời nhạc: {import_err}")
+                                
+                        if lyrics_list:
+                            self.log_signal.emit("Đang đối chiếu căn chỉnh lời nhạc bằng thuật toán DP (Quy hoạch động)...")
+                            try:
+                                from run_local_transcribe import parse_srt, align_dp
+                                raw_segs = parse_srt(found_srt)
+                                aligned = align_dp(raw_segs, lyrics_list)
+                                
+                                blocks = []
+                                for aligned_idx, seg in enumerate(aligned):
+                                    # Loại bỏ khoảng trắng thừa giữa các chữ tiếng Trung
+                                    cleaned_text = re.sub(r'(?<=[\u4e00-\u9fa5])\s+(?=[\u4e00-\u9fa5])', '', seg['text'])
+                                    blocks.append(f"{aligned_idx+1}\n{seg['ts']}\n{cleaned_text}")
+                                    
+                                with open(found_srt, 'w', encoding='utf-8') as f:
+                                    f.write("\n\n".join(blocks) + "\n\n")
+                                self.log_signal.emit("Căn chỉnh đối chiếu lời chuẩn hoàn tất.")
+                            except Exception as dp_err:
+                                self.log_signal.emit(f"Cảnh báo: Lỗi chạy thuật toán DP căn chỉnh: {dp_err}")
+                    except Exception as align_err:
+                        self.log_signal.emit(f"Cảnh báo: Lỗi chuẩn bị đối chiếu lời nhạc: {align_err}")
+                        
                     try:
                         if os.path.exists(output_file):
                             try: os.remove(output_file)
