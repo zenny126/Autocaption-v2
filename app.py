@@ -70,6 +70,10 @@ if __name__ == "__main__":
             if len(sys.argv) > 6 and sys.argv[6] != "None":
                 demucs_args.extend(["--segment", sys.argv[6]])
                 
+            # Add shifts for higher quality
+            if len(sys.argv) > 7 and sys.argv[7] != "1":
+                demucs_args.extend(["--shifts", sys.argv[7]])
+                
             # Add input track
             demucs_args.append(sys.argv[4])
             

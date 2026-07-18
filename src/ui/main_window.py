@@ -1,10 +1,13 @@
 import os
+import sys
 from PySide6 import QtWidgets, QtCore, QtGui
 from src.core.config import MODELS_DIR
 from src.core.utils import load_stylesheet, HAS_CUDA, CUDA_VERSION, open_directory
 from src.ui.components import CardFrame, DropZoneFrame, SuccessPopup
 from src.ui.downloader import DownloaderDialog
 from src.workers.transcribe_worker import TranscribeWorker
+from src.ui.video_viewer import VideoViewer
+from src.core.video_reader import VideoReader
 
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
@@ -13,6 +16,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self._worker_thread = None
         self._worker = None
         self._input_files_list = []
+
+        # Core logic instances for Delogo
+        self._video_reader = VideoReader()
+        self._play_timer = QtCore.QTimer(self)
+        self._play_timer.timeout.connect(self._next_frame)
+        self._video_path = ""
+        self._is_playing = False
 
         self._setup_theme()
         self._build_ui()
@@ -73,24 +83,84 @@ class MainWindow(QtWidgets.QMainWindow):
         content.setSpacing(16)
 
         # Left panel (Form)
-        left_card = QtWidgets.QFrame(self)
+        left_scroll = QtWidgets.QScrollArea(self)
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        
+        left_card = QtWidgets.QFrame()
         left_card.setObjectName("LeftCard")
         left_layout = QtWidgets.QVBoxLayout(left_card)
         left_layout.setContentsMargins(16, 16, 16, 16)
         left_layout.setSpacing(12)
 
         self._build_form(left_layout)
-        content.addWidget(left_card, 1)
+        left_scroll.setWidget(left_card)
+        content.addWidget(left_scroll, 1)
 
-        # Right panel (Log)
-        self._log_panel = QtWidgets.QFrame(self)
-        self._log_panel.setObjectName("LogPanel")
-        right_layout = QtWidgets.QVBoxLayout(self._log_panel)
-        right_layout.setContentsMargins(16, 16, 16, 16)
-        right_layout.setSpacing(8)
-
-        self._build_log(right_layout)
-        content.addWidget(self._log_panel, 1)
+        # Right Tab Widget containing Video Player and Log Panel
+        self._right_tab_widget = QtWidgets.QTabWidget(self)
+        self._right_tab_widget.setObjectName("RightTabWidget")
+        
+        # Tab 1: Video Viewer
+        video_tab = QtWidgets.QWidget()
+        video_tab_layout = QtWidgets.QVBoxLayout(video_tab)
+        video_tab_layout.setContentsMargins(8, 8, 8, 8)
+        video_tab_layout.setSpacing(8)
+        
+        self._video_viewer = VideoViewer()
+        self._video_viewer.video_dropped.connect(self._on_video_dropped_in_viewer)
+        self._video_viewer.selection_changed.connect(self._on_delogo_selection_changed)
+        video_tab_layout.addWidget(self._video_viewer, 1)
+        
+        # Playback panel
+        playback_panel = QtWidgets.QFrame()
+        playback_panel.setObjectName("PlaybackPanel")
+        playback_layout = QtWidgets.QVBoxLayout(playback_panel)
+        playback_layout.setContentsMargins(8, 4, 8, 4)
+        playback_layout.setSpacing(4)
+        
+        self._slider_timeline = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
+        self._slider_timeline.setEnabled(False)
+        self._slider_timeline.valueChanged.connect(self._on_slider_moved)
+        playback_layout.addWidget(self._slider_timeline)
+        
+        controls_bar = QtWidgets.QHBoxLayout()
+        controls_bar.setSpacing(8)
+        self._btn_play = QtWidgets.QPushButton("▶ Phát")
+        self._btn_play.setProperty("class", "NormalBtn")
+        self._btn_play.setFixedWidth(80)
+        self._btn_play.setEnabled(False)
+        self._btn_play.clicked.connect(self._toggle_play)
+        
+        self._btn_stop = QtWidgets.QPushButton("↺ Trở lại đầu")
+        self._btn_stop.setProperty("class", "NormalBtn")
+        self._btn_stop.setFixedWidth(110)
+        self._btn_stop.setEnabled(False)
+        self._btn_stop.clicked.connect(self._stop_video)
+        
+        self._lbl_time = QtWidgets.QLabel("00:00 / 00:00")
+        self._lbl_time.setObjectName("time_label")
+        self._lbl_time.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
+        
+        controls_bar.addWidget(self._btn_play)
+        controls_bar.addWidget(self._btn_stop)
+        controls_bar.addStretch()
+        controls_bar.addWidget(self._lbl_time)
+        playback_layout.addLayout(controls_bar)
+        
+        video_tab_layout.addWidget(playback_panel)
+        self._right_tab_widget.addTab(video_tab, "📺 Màn hình Video")
+        
+        # Tab 2: Log Panel
+        log_tab = QtWidgets.QWidget()
+        log_tab_layout = QtWidgets.QVBoxLayout(log_tab)
+        log_tab_layout.setContentsMargins(8, 8, 8, 8)
+        log_tab_layout.setSpacing(8)
+        self._build_log(log_tab_layout)
+        self._right_tab_widget.addTab(log_tab, "📝 Tiến độ & Nhật ký")
+        
+        content.addWidget(self._right_tab_widget, 1)
+        self._right_tab_widget.setVisible(False)
 
         main_layout.addLayout(content, 1)
 
@@ -175,36 +245,123 @@ class MainWindow(QtWidgets.QMainWindow):
         input_layout.addWidget(self._drop_zone)
         parent_layout.addWidget(input_group)
 
-        # 2. Settings Group
+        # 2. Processing Mode Group
+        mode_group = QtWidgets.QFrame()
+        mode_group.setProperty("class", "GroupFrame")
+        mode_layout = QtWidgets.QVBoxLayout(mode_group)
+        mode_layout.setContentsMargins(20, 20, 20, 20)
+        mode_layout.setSpacing(12)
+
+        lbl_mode_title = QtWidgets.QLabel("2. Chế độ xử lý")
+        lbl_mode_title.setStyleSheet(title_style)
+        mode_layout.addWidget(lbl_mode_title)
+
+        mode_checkbox_layout = QtWidgets.QHBoxLayout()
+        
+        self._chk_task_delogo = QtWidgets.QCheckBox("Xóa Logo video")
+        self._chk_task_delogo.setStyleSheet("color: #E5E5E5; font-weight: 500; background: transparent; border: none;")
+        self._chk_task_delogo.setChecked(False)
+        self._chk_task_delogo.toggled.connect(self._check_ready_state)
+        mode_checkbox_layout.addWidget(self._chk_task_delogo)
+        
+        self._chk_task_demucs = QtWidgets.QCheckBox("Tách lời & nhạc nền (Demucs)")
+        self._chk_task_demucs.setStyleSheet("color: #E5E5E5; font-weight: 500; background: transparent; border: none;")
+        self._chk_task_demucs.setChecked(False)
+        self._chk_task_demucs.toggled.connect(self._on_demucs_toggled)
+        self._chk_task_demucs.toggled.connect(self._check_ready_state)
+        mode_checkbox_layout.addWidget(self._chk_task_demucs)
+
+        self._chk_task_subtitle = QtWidgets.QCheckBox("Tạo phụ đề SRT")
+        self._chk_task_subtitle.setStyleSheet("color: #E5E5E5; font-weight: 500; background: transparent; border: none;")
+        self._chk_task_subtitle.setChecked(True)
+        self._chk_task_subtitle.toggled.connect(self._check_ready_state)
+        mode_checkbox_layout.addWidget(self._chk_task_subtitle)
+        
+        mode_checkbox_layout.addStretch()
+        mode_layout.addLayout(mode_checkbox_layout)
+
+        parent_layout.addWidget(mode_group)
+        parent_layout.addSpacing(12)
+
+        # 3. Demucs Settings Group
+        demucs_group = QtWidgets.QFrame()
+        demucs_group.setProperty("class", "GroupFrame")
+        demucs_layout = QtWidgets.QVBoxLayout(demucs_group)
+        demucs_layout.setContentsMargins(20, 20, 20, 20)
+        demucs_layout.setSpacing(14)
+
+        self._btn_demucs_title = QtWidgets.QPushButton("▶ 3. Cấu hình Tách âm (Demucs)")
+        self._btn_demucs_title.setStyleSheet(title_style + "text-align: left;")
+        self._btn_demucs_title.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        demucs_layout.addWidget(self._btn_demucs_title)
+
+        self._demucs_content = QtWidgets.QWidget()
+        self._demucs_content.hide()
+        demucs_content_layout = QtWidgets.QVBoxLayout(self._demucs_content)
+        demucs_content_layout.setContentsMargins(0, 10, 0, 0)
+        
+        self._btn_demucs_title.clicked.connect(
+            lambda: self._toggle_collapse(self._demucs_content, self._btn_demucs_title, "3. Cấu hình Tách âm (Demucs)")
+        )
+
+        demucs_form = QtWidgets.QFormLayout()
+        demucs_form.setVerticalSpacing(18)
+        demucs_form.setHorizontalSpacing(15)
+        demucs_form.setContentsMargins(0, 5, 0, 5)
+
+        self._lbl_demucs_model = QtWidgets.QLabel("Mức tách Demucs:")
+        self._lbl_demucs_model.setStyleSheet("background: transparent; border: none; color: #A3A3A3;")
+        self._cmb_demucs_model = QtWidgets.QComboBox()
+        self._cmb_demucs_model.addItems([
+            "htdemucs (Tiêu chuẩn - Khuyên dùng)",
+            "htdemucs_ft (Chất lượng cao - Chậm)",
+            "mdx_extra (Nhanh - Tốt nhất cho CPU)"
+        ])
+        demucs_form.addRow(self._lbl_demucs_model, self._cmb_demucs_model)
+        
+        self._lbl_demucs_shifts = QtWidgets.QLabel("Độ chính xác (Shifts):")
+        self._lbl_demucs_shifts.setStyleSheet("background: transparent; border: none; color: #A3A3A3;")
+        self._cmb_demucs_shifts = QtWidgets.QComboBox()
+        self._cmb_demucs_shifts.addItems(["1 (Nhanh - Mặc định)"] + [str(i) for i in range(2, 10)] + ["10 (Chất lượng rất cao - Chậm)"])
+        demucs_form.addRow(self._lbl_demucs_shifts, self._cmb_demucs_shifts)
+
+        demucs_content_layout.addLayout(demucs_form)
+        demucs_layout.addWidget(self._demucs_content)
+
+        parent_layout.addWidget(demucs_group)
+        parent_layout.addSpacing(12)
+
+        # 4. Settings Group (Subtitle)
         settings_group = QtWidgets.QFrame()
         settings_group.setProperty("class", "GroupFrame")
-        settings_group.setMinimumHeight(400)
         settings_layout = QtWidgets.QVBoxLayout(settings_group)
         settings_layout.setContentsMargins(20, 20, 20, 20)
         settings_layout.setSpacing(14)
 
-        lbl_settings_title = QtWidgets.QLabel("2. Cấu hình")
-        lbl_settings_title.setStyleSheet(title_style)
-        settings_layout.addWidget(lbl_settings_title)
+        self._btn_settings_title = QtWidgets.QPushButton("▶ 4. Cấu hình Phụ đề (Whisper)")
+        self._btn_settings_title.setStyleSheet(title_style + "text-align: left;")
+        self._btn_settings_title.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        settings_layout.addWidget(self._btn_settings_title)
 
-        self._chk_same_folder = QtWidgets.QCheckBox("Lưu SRT cùng thư mục với tệp gốc")
+        self._settings_content = QtWidgets.QWidget()
+        self._settings_content.hide()
+        settings_content_layout = QtWidgets.QVBoxLayout(self._settings_content)
+        settings_content_layout.setContentsMargins(0, 10, 0, 0)
+        
+        self._btn_settings_title.clicked.connect(
+            lambda: self._toggle_collapse(self._settings_content, self._btn_settings_title, "4. Cấu hình Phụ đề (Whisper)")
+        )
+
+        self._chk_same_folder = QtWidgets.QCheckBox("Lưu kết quả cùng thư mục với tệp gốc")
         self._chk_same_folder.setStyleSheet("color: #E5E5E5; font-weight: 500; background: transparent; border: none;")
         self._chk_same_folder.setChecked(True)
         self._chk_same_folder.toggled.connect(self._toggle_output_folder)
-        settings_layout.addWidget(self._chk_same_folder)
+        settings_content_layout.addWidget(self._chk_same_folder)
         
-        self._chk_demucs = QtWidgets.QCheckBox("Tách giọng nói (vocal) bằng Demucs trước khi dịch")
-        self._chk_demucs.setStyleSheet("color: #E5E5E5; font-weight: 500; background: transparent; border: none;")
-        self._chk_demucs.setChecked(False)
-        self._chk_demucs.toggled.connect(self._on_demucs_toggled)
-        settings_layout.addWidget(self._chk_demucs)
-        
-        # Spacer between checkbox and form
-        settings_layout.addSpacing(6)
+        settings_content_layout.addSpacing(6)
 
-        # Form Layout for perfect alignment and spacing
         settings_form = QtWidgets.QFormLayout()
-        settings_form.setVerticalSpacing(18)  # Spaced out vertical rows (18px)
+        settings_form.setVerticalSpacing(18)
         settings_form.setHorizontalSpacing(15)
         settings_form.setContentsMargins(0, 5, 0, 5)
 
@@ -219,7 +376,7 @@ class MainWindow(QtWidgets.QMainWindow):
         output_row.addWidget(self._btn_browse_output, 0)
         settings_form.addRow(self._lbl_output, output_row)
 
-        # Model row with refresh and download options
+        # Model row
         model_row = QtWidgets.QHBoxLayout()
         self._lbl_model = QtWidgets.QLabel("Mô hình:")
         self._lbl_model.setStyleSheet("background: transparent; border: none; color: #A3A3A3;")
@@ -258,51 +415,94 @@ class MainWindow(QtWidgets.QMainWindow):
         self._cmb_threads.setCurrentText(str(min(4, cpu_cores)))
         settings_form.addRow(self._lbl_threads, self._cmb_threads)
 
-        # Demucs model row
-        self._lbl_demucs_model = QtWidgets.QLabel("Mức tách Demucs:")
-        self._lbl_demucs_model.setStyleSheet("background: transparent; border: none; color: #A3A3A3;")
-        self._cmb_demucs_model = QtWidgets.QComboBox()
-        self._cmb_demucs_model.addItems([
-            "htdemucs (Tiêu chuẩn - Khuyên dùng)",
-            "htdemucs_ft (Chất lượng cao - Chậm)",
-            "mdx_extra_q (Nhanh - Tiết kiệm RAM)"
-        ])
-        settings_form.addRow(self._lbl_demucs_model, self._cmb_demucs_model)
-
-        settings_layout.addLayout(settings_form)
+        settings_content_layout.addLayout(settings_form)
+        settings_layout.addWidget(self._settings_content)
 
         parent_layout.addWidget(settings_group)
+        parent_layout.addSpacing(12)
+
+        # 5. Delogo Settings Group
+        delogo_group = QtWidgets.QFrame()
+        delogo_group.setProperty("class", "GroupFrame")
+        delogo_layout = QtWidgets.QVBoxLayout(delogo_group)
+        delogo_layout.setContentsMargins(20, 20, 20, 20)
+        delogo_layout.setSpacing(12)
+        
+        self._btn_delogo_title = QtWidgets.QPushButton("▶ 5. Cấu hình Xóa Logo")
+        self._btn_delogo_title.setStyleSheet(title_style + "text-align: left;")
+        self._btn_delogo_title.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        delogo_layout.addWidget(self._btn_delogo_title)
+
+        self._delogo_content = QtWidgets.QWidget()
+        self._delogo_content.hide()
+        delogo_content_layout = QtWidgets.QVBoxLayout(self._delogo_content)
+        delogo_content_layout.setContentsMargins(0, 10, 0, 0)
+        
+        self._btn_delogo_title.clicked.connect(
+            lambda: self._toggle_collapse(self._delogo_content, self._btn_delogo_title, "5. Cấu hình Xóa Logo")
+        )
+        
+        # Selection info
+        info_row = QtWidgets.QHBoxLayout()
+        self._lbl_sel_coords = QtWidgets.QLabel("Số vùng chọn: 0")
+        self._lbl_sel_coords.setStyleSheet("color: #cbd5e1;")
+        self._lbl_sel_size = QtWidgets.QLabel("Chi tiết: --")
+        self._lbl_sel_size.setStyleSheet("color: #cbd5e1;")
+        info_row.addWidget(self._lbl_sel_coords)
+        info_row.addWidget(self._lbl_sel_size)
+        delogo_content_layout.addLayout(info_row)
+        
+        self._btn_clear_sel = QtWidgets.QPushButton("↺ Xóa vùng chọn")
+        self._btn_clear_sel.setProperty("class", "NormalBtn")
+        self._btn_clear_sel.setEnabled(False)
+        self._btn_clear_sel.clicked.connect(self._on_clear_selection_clicked)
+        delogo_content_layout.addWidget(self._btn_clear_sel)
+        delogo_layout.addWidget(self._delogo_content)
+        
+        parent_layout.addWidget(delogo_group)
         parent_layout.addSpacing(16)
 
-        # 3. Actions
+        # 5. Actions
         self._progress = QtWidgets.QProgressBar()
         self._progress.setRange(0, 100)
         self._progress.setValue(0)
         self._progress.setFixedHeight(24)
         parent_layout.addWidget(self._progress)
         
-        btn_layout = QtWidgets.QHBoxLayout()
-        btn_layout.setSpacing(12)
-        self._btn_start = QtWidgets.QPushButton("BẮT ĐẦU TẠO PHỤ ĐỀ")
+        action_btn_layout = QtWidgets.QVBoxLayout()
+        action_btn_layout.setSpacing(8)
+        
+        btn_top_row = QtWidgets.QHBoxLayout()
+        btn_top_row.setSpacing(12)
+        
+        self._btn_start = QtWidgets.QPushButton("🚀 BẮT ĐẦU XỬ LÝ")
         self._btn_start.setObjectName("StartBtn")
         self._btn_start.setMinimumHeight(48)
+        self._btn_start.setEnabled(True)
         add_glow(self._btn_start, color="#7c4dff", radius=20)
+        
+        btn_top_row.addWidget(self._btn_start, 1)
+        action_btn_layout.addLayout(btn_top_row)
+        
+        btn_bottom_row = QtWidgets.QHBoxLayout()
+        btn_bottom_row.setSpacing(12)
         
         self._btn_cancel = QtWidgets.QPushButton("Hủy bỏ")
         self._btn_cancel.setObjectName("CancelBtn")
         self._btn_cancel.setProperty("class", "NormalBtn")
-        self._btn_cancel.setMinimumHeight(48)
+        self._btn_cancel.setMinimumHeight(44)
         self._btn_cancel.setEnabled(False)
         
         self._btn_open = QtWidgets.QPushButton("Mở thư mục")
         self._btn_open.setObjectName("OpenFolderBtn")
         self._btn_open.setProperty("class", "NormalBtn")
-        self._btn_open.setMinimumHeight(48)
+        self._btn_open.setMinimumHeight(44)
         
-        btn_layout.addWidget(self._btn_start, 2)
-        btn_layout.addWidget(self._btn_cancel, 1)
-        btn_layout.addWidget(self._btn_open, 1)
-        parent_layout.addLayout(btn_layout)
+        btn_bottom_row.addWidget(self._btn_cancel, 1)
+        btn_bottom_row.addWidget(self._btn_open, 1)
+        action_btn_layout.addLayout(btn_bottom_row)
+        
+        parent_layout.addLayout(action_btn_layout)
         parent_layout.addStretch()
 
         # Connect actions
@@ -314,8 +514,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._btn_start.clicked.connect(self._on_start)
         self._btn_cancel.clicked.connect(self._on_cancel)
         self._btn_open.clicked.connect(self._open_output_folder)
-        
         self._toggle_output_folder()
+    def _toggle_collapse(self, content_widget, btn, base_title):
+        if content_widget.isVisible():
+            content_widget.hide()
+            btn.setText(f"▶ {base_title}")
+        else:
+            content_widget.show()
+            btn.setText(f"▼ {base_title}")
 
     def _toggle_output_folder(self):
         is_same = self._chk_same_folder.isChecked()
@@ -323,8 +529,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._btn_browse_output.setEnabled(not is_same)
 
     def _on_demucs_toggled(self, checked):
+        self._btn_demucs_title.setEnabled(checked)
         self._lbl_demucs_model.setEnabled(checked)
         self._cmb_demucs_model.setEnabled(checked)
+        self._lbl_demucs_shifts.setEnabled(checked)
+        self._cmb_demucs_shifts.setEnabled(checked)
 
     def _build_log(self, parent_layout):
         label = QtWidgets.QLabel("Nhật ký & Tiến độ chạy")
@@ -361,7 +570,9 @@ class MainWindow(QtWidgets.QMainWindow):
             for path in self._input_files_list:
                 card = CardFrame(path)
                 card.double_clicked.connect(self._remove_file_by_path)
+                card.clicked.connect(self._on_file_clicked)
                 self._files_layout.addWidget(card)
+        self._check_ready_state()
 
     def _remove_file_by_path(self, path):
         if path in self._input_files_list:
@@ -385,7 +596,9 @@ class MainWindow(QtWidgets.QMainWindow):
         
         self._output_edit.setText(settings.value("output_folder", ""))
         self._chk_same_folder.setChecked(settings.value("save_same_folder", True, type=bool))
-        self._chk_demucs.setChecked(settings.value("demucs_enabled", False, type=bool))
+        self._chk_task_delogo.setChecked(settings.value("task_delogo", False, type=bool))
+        self._chk_task_demucs.setChecked(settings.value("task_demucs", False, type=bool))
+        self._chk_task_subtitle.setChecked(settings.value("task_subtitle", True, type=bool))
         
         lang = settings.value("language", "Tự động phát hiện (Auto)")
         self._cmb_lang.setCurrentText(lang)
@@ -407,8 +620,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._cmb_threads.setCurrentText(str(threads))
 
         demucs_model = settings.value("demucs_model", "htdemucs (Tiêu chuẩn - Khuyên dùng)")
-        self._cmb_demucs_model.setCurrentText(str(demucs_model))
-        self._on_demucs_toggled(self._chk_demucs.isChecked())
+        self._cmb_demucs_model.setCurrentText(demucs_model)
+        
+        demucs_shifts = settings.value("demucs_shifts", "1 (Nhanh - Mặc định)")
+        self._cmb_demucs_shifts.setCurrentText(demucs_shifts)
+        self._on_demucs_toggled(self._chk_task_demucs.isChecked())
 
         self._input_files_list.clear()
         input_files = settings.value("input_files_list", [])
@@ -421,7 +637,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     self._add_input_file(path)
         self._update_drop_zone_visuals()
 
-        self._log_panel.setVisible(False)
+        self._right_tab_widget.setVisible(False)
         self.setMinimumWidth(550)
         self.resize(600, 930)
         self._toggle_output_folder()
@@ -430,8 +646,11 @@ class MainWindow(QtWidgets.QMainWindow):
         settings = QtCore.QSettings("WhisperSubtitler", "Settings")
         settings.setValue("output_folder", self._output_edit.text())
         settings.setValue("save_same_folder", self._chk_same_folder.isChecked())
-        settings.setValue("demucs_enabled", self._chk_demucs.isChecked())
+        settings.setValue("task_delogo", self._chk_task_delogo.isChecked())
+        settings.setValue("task_demucs", self._chk_task_demucs.isChecked())
+        settings.setValue("task_subtitle", self._chk_task_subtitle.isChecked())
         settings.setValue("demucs_model", self._cmb_demucs_model.currentText())
+        settings.setValue("demucs_shifts", self._cmb_demucs_shifts.currentText())
         settings.setValue("language", self._cmb_lang.currentText())
         settings.setValue("device_index", self._cmb_device.currentIndex())
         settings.setValue("threads", int(self._cmb_threads.currentText()))
@@ -451,8 +670,8 @@ class MainWindow(QtWidgets.QMainWindow):
         settings.setValue("last_output_dir", self._last_output_dir)
 
     def _toggle_log_panel(self):
-        show = not self._log_panel.isVisible()
-        self._log_panel.setVisible(show)
+        show = not self._right_tab_widget.isVisible()
+        self._right_tab_widget.setVisible(show)
         self.setMinimumWidth(950 if show else 550)
         self.resize(1100 if show else 600, self.height())
         self._btn_toggle_log.setText("Hide Log" if show else "Show Log")
@@ -524,6 +743,15 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(self, "Lỗi", "Vui lòng chọn hoặc tải mô hình Whisper trước!")
             return
 
+        delogo_enabled = self._chk_task_delogo.isChecked()
+        demucs_enabled = self._chk_task_demucs.isChecked()
+        subtitle_enabled = self._chk_task_subtitle.isChecked()
+        
+        delogo_regions = self._video_viewer.get_video_coords()
+        if delogo_enabled and not delogo_regions:
+            QtWidgets.QMessageBox.warning(self, "Lỗi", "Vui lòng vẽ vùng chọn logo trên màn hình xem video trước khi chạy tiến trình Xóa Logo!")
+            return
+
         self._save_settings()
         self._running = True
         self._btn_start.setEnabled(False)
@@ -533,16 +761,23 @@ class MainWindow(QtWidgets.QMainWindow):
         # Clear log panel
         self._log_text.clear()
         self._log_text.setPlainText("Bắt đầu xử lý...")
+        
+        if not self._right_tab_widget.isVisible():
+            self._toggle_log_panel()
+        self._right_tab_widget.setCurrentIndex(1)
 
         device_val = "CPU" if self._cmb_device.currentIndex() == 0 else "GPU"
         
         demucs_combo_text = self._cmb_demucs_model.currentText()
         if "htdemucs_ft" in demucs_combo_text:
             demucs_model_name = "htdemucs_ft"
-        elif "mdx_extra_q" in demucs_combo_text:
-            demucs_model_name = "mdx_extra_q"
+        elif "mdx_extra" in demucs_combo_text:
+            demucs_model_name = "mdx_extra"
         else:
             demucs_model_name = "htdemucs"
+            
+        demucs_shifts_text = self._cmb_demucs_shifts.currentText()
+        demucs_shifts_val = int(demucs_shifts_text.split(" ")[0]) if demucs_shifts_text else 1
 
         self._worker = TranscribeWorker(
             self._input_files_list, 
@@ -552,8 +787,13 @@ class MainWindow(QtWidgets.QMainWindow):
             self._cmb_lang.currentText(), 
             int(self._cmb_threads.currentText()),
             device_val,
-            self._chk_demucs.isChecked(),
-            demucs_model_name
+            demucs_enabled,
+            demucs_model_name,
+            delogo_enabled,
+            delogo_regions,
+            subtitle_enabled,
+            4, # dummy delogo_band to match __init__ or remove from __init__
+            demucs_shifts_val
         )
         self._worker.log_signal.connect(self._on_log)
         self._worker.status_signal.connect(self._on_status)
@@ -594,7 +834,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._worker_thread = None
 
         if success:
-            self._status_label.setText("Hoàn tất tạo phụ đề!")
+            self._status_label.setText("Hoàn tất xử lý!")
             popup = SuccessPopup(saved_paths, failed_files, self)
             popup.exec()
         else:
@@ -609,6 +849,133 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def closeEvent(self, event):
         self._save_settings()
+        self._stop_video()
+        self._video_reader.close()
         if self._running:
             self._on_cancel()
         event.accept()
+
+    # --- HÀNH VI TƯƠNG TÁC DELOGO ---
+    def _on_file_clicked(self, path):
+        _, ext = os.path.splitext(path.lower())
+        if ext in [".mp4", ".mkv", ".avi", ".mov", ".webm"]:
+            if not self._right_tab_widget.isVisible():
+                self._toggle_log_panel()
+            self._right_tab_widget.setCurrentIndex(0)
+            self._load_video(path)
+
+    def _on_video_dropped_in_viewer(self, filepath):
+        self._add_files_and_update([filepath])
+        self._load_video(filepath)
+
+    def _load_video(self, filepath):
+        if not os.path.exists(filepath):
+            return
+        
+        self._stop_video()
+        
+        if not self._video_reader.open(filepath):
+            QtWidgets.QMessageBox.critical(self, "Lỗi", "Không thể đọc tệp video này.")
+            return
+            
+        self._video_path = filepath
+        self._video_viewer.clear_selection()
+        
+        self._slider_timeline.setEnabled(True)
+        self._slider_timeline.setRange(0, self._video_reader.total_frames - 1)
+        self._slider_timeline.setValue(0)
+        
+        self._btn_play.setEnabled(True)
+        self._btn_stop.setEnabled(True)
+        
+        self._check_ready_state()
+        self._display_frame(0)
+
+    def _display_frame(self, frame_index):
+        q_img = self._video_reader.get_qimage_at(frame_index)
+        if not q_img.isNull():
+            orig_size = QtCore.QSize(self._video_reader.width, self._video_reader.height)
+            self._video_viewer.set_image(q_img, orig_size)
+            
+            current_sec = frame_index / self._video_reader.fps if self._video_reader.fps > 0 else 0.0
+            time_str = f"{self._format_time(current_sec)} / {self._format_time(self._video_reader.duration)}"
+            self._lbl_time.setText(time_str)
+            
+            self._update_selection_info_labels()
+
+    def _format_time(self, seconds):
+        h = int(seconds // 3600)
+        m = int((seconds % 3600) // 60)
+        s = int(seconds % 60)
+        if h > 0:
+            return f"{h:02d}:{m:02d}:{s:02d}"
+        return f"{m:02d}:{s:02d}"
+
+    def _toggle_play(self):
+        if not self._video_path:
+            return
+        if self._is_playing:
+            self._pause_video()
+        else:
+            self._play_video()
+
+    def _play_video(self):
+        interval_ms = int(1000 / self._video_reader.fps) if self._video_reader.fps > 0 else 33
+        self._play_timer.start(interval_ms)
+        self._is_playing = True
+        self._btn_play.setText("⏸ Tạm dừng")
+
+    def _pause_video(self):
+        self._play_timer.stop()
+        self._is_playing = False
+        self._btn_play.setText("▶ Phát")
+
+    def _stop_video(self):
+        self._pause_video()
+        if self._video_path:
+            self._slider_timeline.setValue(0)
+            self._display_frame(0)
+
+    def _next_frame(self):
+        current_val = self._slider_timeline.value()
+        if current_val < self._video_reader.total_frames - 1:
+            self._slider_timeline.blockSignals(True)
+            self._slider_timeline.setValue(current_val + 1)
+            self._slider_timeline.blockSignals(False)
+            self._display_frame(current_val + 1)
+        else:
+            self._pause_video()
+
+    def _on_slider_moved(self, value):
+        self._display_frame(value)
+
+
+
+    def _on_clear_selection_clicked(self):
+        self._video_viewer.clear_selection()
+
+    def _on_delogo_selection_changed(self, has_selection):
+        self._btn_clear_sel.setEnabled(has_selection)
+        self._check_ready_state()
+        self._update_selection_info_labels()
+
+    def _check_ready_state(self):
+        has_file = len(self._input_files_list) > 0
+        has_task = (self._chk_task_delogo.isChecked() or 
+                   self._chk_task_demucs.isChecked() or 
+                   self._chk_task_subtitle.isChecked())
+        self._btn_start.setEnabled(has_file and has_task)
+
+    def _update_selection_info_labels(self):
+        coords_list = self._video_viewer.get_video_coords()
+        if not coords_list:
+            self._lbl_sel_coords.setText("Số vùng chọn: 0")
+            self._lbl_sel_size.setText("Chi tiết: --")
+        else:
+            self._lbl_sel_coords.setText(f"Số vùng chọn: {len(coords_list)}")
+            if len(coords_list) == 1:
+                vx, vy, vw, vh = coords_list[0]
+                self._lbl_sel_size.setText(f"Kích thước: {vw}x{vh} tại ({vx},{vy})")
+            else:
+                self._lbl_sel_size.setText("Chi tiết: Nhiều vùng đã chọn")
+

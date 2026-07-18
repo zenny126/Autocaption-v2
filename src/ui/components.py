@@ -5,6 +5,7 @@ from src.core.utils import open_directory
 
 class CardFrame(QtWidgets.QFrame):
     double_clicked = QtCore.Signal(str)
+    clicked = QtCore.Signal(str)
 
     def __init__(self, path, parent=None):
         super().__init__(parent)
@@ -36,6 +37,11 @@ class CardFrame(QtWidgets.QFrame):
         
         card_layout.addWidget(icon_lbl)
         card_layout.addWidget(text_lbl)
+
+    def mousePressEvent(self, event):
+        if event.button() == QtCore.Qt.MouseButton.LeftButton:
+            self.clicked.emit(self.path)
+        super().mousePressEvent(event)
 
     def mouseDoubleClickEvent(self, event):
         self.double_clicked.emit(self.path)

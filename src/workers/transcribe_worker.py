@@ -12,7 +12,7 @@ class TranscribeWorker(QtCore.QThread):
     status_signal = QtCore.Signal(str)
     finished_signal = QtCore.Signal(bool, list, list) # success, saved_paths, failed_files
     
-    def __init__(self, input_files, output_folder, save_same_folder, model_filename, lang_text, thread_count, device, demucs_enabled, demucs_model="htdemucs"):
+    def __init__(self, input_files, output_folder, save_same_folder, model_filename, lang_text, thread_count, device, demucs_enabled, demucs_model="htdemucs", delogo_enabled=False, delogo_regions=None, subtitle_enabled=True, delogo_band=4, demucs_shifts=1):
         super().__init__()
         self.input_files = input_files
         self.output_folder = output_folder
@@ -23,6 +23,12 @@ class TranscribeWorker(QtCore.QThread):
         self.device = device
         self.demucs_enabled = demucs_enabled
         self.demucs_model = demucs_model
+        self.demucs_shifts = demucs_shifts
+        self.delogo_enabled = delogo_enabled
+        self.delogo_regions = delogo_regions or []
+        self.subtitle_enabled = subtitle_enabled
+        self.delogo_band = delogo_band
+        
         self.current_process = None
         self.cancelled = False
         
@@ -48,7 +54,6 @@ class TranscribeWorker(QtCore.QThread):
         failed_files = []
         total_files = len(self.input_files)
         
-        # 1. Convert all input files to WAV sequentially (and apply Demucs if enabled)
         temp_wav_files = []
         
         for idx, input_file in enumerate(self.input_files):
@@ -56,7 +61,49 @@ class TranscribeWorker(QtCore.QThread):
                 break
                 
             filename = os.path.basename(input_file)
-            self.status_signal.emit(f"Đang chuyển đổi tệp {idx+1}/{total_files}: {filename}...")
+            current_audio_source = input_file
+            
+            # --- BƯỚC 0: XÓA LOGO ---
+            if self.delogo_enabled and self.delogo_regions:
+                _, ext = os.path.splitext(input_file.lower())
+                if ext in [".mp4", ".mkv", ".avi", ".mov", ".webm"]:
+                    self.status_signal.emit(f"Đang xóa logo tệp {idx+1}/{total_files}...")
+                    self.log_signal.emit(f"FFmpeg: Đang xử lý xóa logo cho {filename}...")
+                    
+                    filter_str = ",".join([f"delogo=x={x}:y={y}:w={w}:h={h}:show=0" for (x, y, w, h) in self.delogo_regions])
+                    out_dir = os.path.dirname(input_file) if self.save_same_folder else self.output_folder
+                    base_name = os.path.splitext(filename)[0]
+                    delogo_out = os.path.join(out_dir, f"{base_name}_nologo{ext}")
+                    
+                    ffmpeg_delogo = [
+                        FFMPEG_PATH, "-y", "-i", input_file,
+                        "-vf", filter_str,
+                        "-c:v", "libx264", "-crf", "23", "-preset", "fast",
+                        "-c:a", "copy", delogo_out
+                    ]
+                    
+                    self.current_process = subprocess.Popen(
+                        ffmpeg_delogo, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=CREATION_FLAGS
+                    )
+                    _, stderr = self.current_process.communicate()
+                    if self.cancelled:
+                        break
+                        
+                    if self.current_process.returncode == 0 and os.path.exists(delogo_out):
+                        self.log_signal.emit(f"Đã lưu video xóa logo tại: {delogo_out}")
+                        current_audio_source = delogo_out
+                        saved_paths.append(delogo_out)
+                    else:
+                        err_msg = stderr.decode('utf-8', errors='ignore')
+                        self.log_signal.emit(f"Cảnh báo: Lỗi xóa logo cho {filename}. Bỏ qua.\n{err_msg}")
+            
+            # NẾU KHÔNG CHỌN SUBTITLE & KHÔNG CHỌN DEMUCS THÌ BỎ QUA CÁC BƯỚC SAU
+            if not self.subtitle_enabled and not self.demucs_enabled:
+                self.progress_signal.emit(int(((idx + 1) * 100) / total_files))
+                continue
+                
+            # --- BƯỚC 1: TRÍCH XUẤT WAV & DEMUCS ---
+            self.status_signal.emit(f"Đang xử lý âm thanh tệp {idx+1}/{total_files}...")
             
             temp_wav = os.path.join(BIN_DIR, f"temp_transcribe_{idx}.wav")
             if os.path.exists(temp_wav):
@@ -64,15 +111,15 @@ class TranscribeWorker(QtCore.QThread):
                 except: pass
                 
             if self.demucs_enabled:
-                self.log_signal.emit(f"FFmpeg: Trích xuất âm thanh gốc chất lượng cao từ {filename}...")
+                self.log_signal.emit(f"FFmpeg: Trích xuất âm thanh gốc chất lượng cao từ {os.path.basename(current_audio_source)}...")
                 ffmpeg_cmd = [
-                    FFMPEG_PATH, "-y", "-i", input_file,
+                    FFMPEG_PATH, "-y", "-i", current_audio_source,
                     "-vn", "-acodec", "pcm_s16le", temp_wav
                 ]
             else:
-                self.log_signal.emit(f"FFmpeg: Chuyển đổi {filename} sang WAV 16kHz...")
+                self.log_signal.emit(f"FFmpeg: Chuyển đổi {os.path.basename(current_audio_source)} sang WAV 16kHz...")
                 ffmpeg_cmd = [
-                    FFMPEG_PATH, "-y", "-i", input_file,
+                    FFMPEG_PATH, "-y", "-i", current_audio_source,
                     "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", temp_wav
                 ]
             
@@ -90,8 +137,8 @@ class TranscribeWorker(QtCore.QThread):
                 
             if self.current_process.returncode != 0 or not os.path.exists(temp_wav):
                 err_msg = stderr.decode('utf-8', errors='ignore')
-                self.log_signal.emit(f"LỖI: FFmpeg chuyển đổi thất bại cho {filename}:\n{err_msg}")
-                failed_files.append((input_file, "FFmpeg failed"))
+                self.log_signal.emit(f"LỖI: FFmpeg chuyển đổi âm thanh thất bại cho {filename}:\n{err_msg}")
+                failed_files.append((input_file, "Audio extraction failed"))
                 continue
                 
             # If Demucs voice separation is enabled, perform it now
@@ -117,7 +164,8 @@ class TranscribeWorker(QtCore.QThread):
                             temp_demucs_dir, 
                             temp_wav, 
                             demucs_device, 
-                            demucs_segment
+                            demucs_segment,
+                            str(self.demucs_shifts)
                         ]
                     else:
                         worker_cmd = [
@@ -128,7 +176,8 @@ class TranscribeWorker(QtCore.QThread):
                             temp_demucs_dir, 
                             temp_wav, 
                             demucs_device, 
-                            demucs_segment
+                            demucs_segment,
+                            str(self.demucs_shifts)
                         ]
                     
                     self.current_process = subprocess.Popen(
@@ -296,12 +345,27 @@ class TranscribeWorker(QtCore.QThread):
             # Conversion/Separation progress contributes to first 30%
             self.progress_signal.emit(int(((idx + 1) * 30) / total_files))
             
-        if self.cancelled or not temp_wav_files:
+        if self.cancelled:
             self._cleanup_temp_files([w for _, w in temp_wav_files])
             self.finished_signal.emit(False, [], failed_files)
             return
             
+        if not temp_wav_files:
+            if saved_paths:
+                self.progress_signal.emit(100)
+                self.finished_signal.emit(True, saved_paths, failed_files)
+            else:
+                self.finished_signal.emit(False, [], failed_files)
+            return
+            
         # 2. Run whisper-cli.exe once for all successfully converted files
+        if not self.subtitle_enabled:
+            self.log_signal.emit("Tạo phụ đề bị tắt, bỏ qua bước dịch (Whisper).")
+            self._cleanup_temp_files([w for _, w in temp_wav_files])
+            self.progress_signal.emit(100)
+            self.finished_signal.emit(True, saved_paths, failed_files)
+            return
+            
         whisper_exe = get_whisper_exe()
         if not whisper_exe:
             self.log_signal.emit("LỖI: Không tìm thấy tệp thực thi whisper-cli.exe hoặc main.exe!")
@@ -328,7 +392,7 @@ class TranscribeWorker(QtCore.QThread):
             if not os.path.exists(vad_model_path):
                 self.log_signal.emit("Mô hình VAD (Silero) chưa có. Đang tải tự động từ HuggingFace...")
                 import urllib.request
-                url = "https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-vad.bin"
+                url = "https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v5.1.2.bin"
                 req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
                 with urllib.request.urlopen(req) as response, open(vad_model_path, 'wb') as out_file:
                     out_file.write(response.read())
@@ -493,7 +557,15 @@ class TranscribeWorker(QtCore.QThread):
                         if os.path.exists(output_file):
                             try: os.remove(output_file)
                             except: pass
-                        shutil.move(found_srt, output_file)
+                            
+                        # Đảm bảo SRT được lưu dưới định dạng utf-8-sig (có BOM) để hiển thị chuẩn tiếng Trung trên Windows
+                        with open(found_srt, 'r', encoding='utf-8', errors='ignore') as f_in:
+                            content = f_in.read()
+                        with open(output_file, 'w', encoding='utf-8-sig') as f_out:
+                            f_out.write(content)
+                        try: os.remove(found_srt)
+                        except: pass
+                        
                         self.log_signal.emit(f"Hoàn tất: {output_file}")
                         saved_paths.append(output_file)
                     except Exception as move_err:

@@ -13,6 +13,7 @@ else:
 BIN_DIR = os.path.join(BASE_DIR, "bin")
 MODELS_DIR = os.path.join(BIN_DIR, "models")
 FFMPEG_PATH = os.path.join(BIN_DIR, "ffmpeg.exe")
+FFPROBE_PATH = os.path.join(BIN_DIR, "ffprobe.exe")
 WHISPER_CLI_PATH = os.path.join(BIN_DIR, "whisper-cli.exe")
 WHISPER_MAIN_PATH = os.path.join(BIN_DIR, "main.exe")
 

@@ -2,7 +2,7 @@ import os
 import urllib.request
 import zipfile
 from PySide6 import QtCore
-from src.core.config import BIN_DIR, MODELS_DIR, FFMPEG_PATH, FFMPEG_URL, MODEL_URLS
+from src.core.config import BIN_DIR, MODELS_DIR, FFMPEG_PATH, FFPROBE_PATH, FFMPEG_URL, MODEL_URLS
 from src.core.utils import format_size, get_whisper_download_url, HAS_CUDA
 
 class DownloadWorker(QtCore.QObject):
@@ -40,7 +40,8 @@ class DownloadWorker(QtCore.QObject):
         with urllib.request.urlopen(req) as response:
             total_size = int(response.info().get('Content-Length', 0))
             downloaded = 0
-            block_size = 1024 * 64
+            block_size = 1024 * 128
+            last_percent = -1
             
             with open(dest_path, 'wb') as f:
                 while True:
@@ -54,9 +55,14 @@ class DownloadWorker(QtCore.QObject):
                     
                     if total_size > 0:
                         percent = int((downloaded / total_size) * 100)
-                        self.progress_signal.emit(f"{desc}: {format_size(downloaded)} / {format_size(total_size)} ({percent}%)", percent)
+                        if percent != last_percent:
+                            self.progress_signal.emit(f"{desc}: {format_size(downloaded)} / {format_size(total_size)} ({percent}%)", percent)
+                            last_percent = percent
                     else:
-                        self.progress_signal.emit(f"{desc}: {format_size(downloaded)}", 50)
+                        # If total_size is unknown, emit less frequently based on downloaded bytes
+                        if downloaded // (1024 * 1024) != last_percent:
+                            self.progress_signal.emit(f"{desc}: {format_size(downloaded)}", 50)
+                            last_percent = downloaded // (1024 * 1024)
         return True
 
     def download_and_extract_ffmpeg(self):
@@ -64,12 +70,19 @@ class DownloadWorker(QtCore.QObject):
         self.progress_signal.emit("Đang chuẩn bị tải FFmpeg...", 0)
         
         if self.download_file_with_progress(FFMPEG_URL, zip_path, "Tải FFmpeg"):
-            self.progress_signal.emit("Đang giải nén FFmpeg.exe...", 95)
+            self.progress_signal.emit("Đang giải nén FFmpeg & FFprobe...", 95)
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                extracted_count = 0
                 for name in zip_ref.namelist():
                     if name.endswith("ffmpeg.exe"):
                         with zip_ref.open(name) as source, open(FFMPEG_PATH, 'wb') as target:
                             target.write(source.read())
+                        extracted_count += 1
+                    elif name.endswith("ffprobe.exe"):
+                        with zip_ref.open(name) as source, open(FFPROBE_PATH, 'wb') as target:
+                            target.write(source.read())
+                        extracted_count += 1
+                    if extracted_count >= 2:
                         break
             try:
                 os.remove(zip_path)

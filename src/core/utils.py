@@ -1,7 +1,7 @@
 import os
 import re
 import subprocess
-from src.core.config import FFMPEG_PATH, CREATION_FLAGS, WHISPER_CLI_PATH, WHISPER_MAIN_PATH, BIN_DIR, MODELS_DIR, WHISPER_URL_CUDA_12, WHISPER_URL_CUDA_11, WHISPER_URL_BLAS
+from src.core.config import FFMPEG_PATH, FFPROBE_PATH, CREATION_FLAGS, WHISPER_CLI_PATH, WHISPER_MAIN_PATH, BIN_DIR, MODELS_DIR, WHISPER_URL_CUDA_12, WHISPER_URL_CUDA_11, WHISPER_URL_BLAS
 
 # Helper function to format bytes
 def format_size(bytes_num):
@@ -91,7 +91,7 @@ def check_gpu_available():
 
 def check_system_assets():
     missing = []
-    if not os.path.exists(FFMPEG_PATH):
+    if not os.path.exists(FFMPEG_PATH) or not os.path.exists(FFPROBE_PATH):
         missing.append("FFmpeg (Audio Converter)")
         
     whisper_exe = get_whisper_exe()
