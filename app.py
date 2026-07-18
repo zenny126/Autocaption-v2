@@ -38,24 +38,7 @@ if __name__ == "__main__":
         try:
             import torch
             import torchaudio
-            import soundfile as sf
-            
-            def custom_load(uri, *args, **kwargs):
-                data, samplerate = sf.read(uri, dtype='float32')
-                tensor = torch.from_numpy(data)
-                if len(tensor.shape) == 1:
-                    tensor = tensor.unsqueeze(0)
-                else:
-                    tensor = tensor.t()
-                return tensor, samplerate
 
-            def custom_save(uri, src, sample_rate, *args, **kwargs):
-                data = src.t().cpu().numpy()
-                sf.write(uri, data, sample_rate)
-            
-            torchaudio.load = custom_load
-            torchaudio.save = custom_save
-            
             from demucs.separate import main as demucs_main
             
             # Reconstruct sys.argv for demucs

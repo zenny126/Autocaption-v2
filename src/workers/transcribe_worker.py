@@ -4,7 +4,7 @@ import shutil
 import subprocess
 from PySide6 import QtCore
 from src.core.config import BIN_DIR, MODELS_DIR, FFMPEG_PATH, CREATION_FLAGS
-from src.core.utils import get_audio_codec, get_whisper_exe
+from src.core.utils import get_whisper_exe
 
 class TranscribeWorker(QtCore.QThread):
     log_signal = QtCore.Signal(str)
@@ -180,6 +180,12 @@ class TranscribeWorker(QtCore.QThread):
                             str(self.demucs_shifts)
                         ]
                     
+                    # Hide HF symlink warning and notify user
+                    env = os.environ.copy()
+                    env["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+                    
+                    self.log_signal.emit("Demucs: Nếu đây là lần đầu dùng mô hình này, hệ thống sẽ tải data (vài trăm MB). Vui lòng chờ...")
+                    
                     self.current_process = subprocess.Popen(
                         worker_cmd,
                         stdout=subprocess.PIPE,
@@ -187,7 +193,8 @@ class TranscribeWorker(QtCore.QThread):
                         text=True,
                         encoding="utf-8",
                         errors="ignore",
-                        creationflags=CREATION_FLAGS
+                        creationflags=CREATION_FLAGS,
+                        env=env
                     )
                     
                     # Pipe output to log panel in real-time
@@ -230,27 +237,9 @@ class TranscribeWorker(QtCore.QThread):
                         input_base = os.path.splitext(os.path.basename(input_file))[0]
                         
                         # 1. Convert no_vocals.wav to original format and save in input_dir
-                        codec = get_audio_codec(input_file)
-                        if codec in ["aac", "mp4a"]:
-                            out_ext = "m4a"
-                            acodec = "aac"
-                            acodec_opts = ["-b:a", "192k"]
-                        elif codec in ["mp3", "mp3float"]:
-                            out_ext = "mp3"
-                            acodec = "libmp3lame"
-                            acodec_opts = ["-q:a", "2"]
-                        elif codec == "flac":
-                            out_ext = "flac"
-                            acodec = "flac"
-                            acodec_opts = []
-                        elif codec in ["pcm_s16le", "pcm_s24le", "pcm_f32le", "wav"]:
-                            out_ext = "wav"
-                            acodec = "pcm_s16le"
-                            acodec_opts = []
-                        else:
-                            out_ext = "mp3"
-                            acodec = "libmp3lame"
-                            acodec_opts = ["-q:a", "2"]
+                        out_ext = os.path.splitext(input_file)[1].strip(".").lower()
+                        if out_ext in ["mp4", "mkv", "avi", "mov", "webm", "aac", "m4a"]: out_ext = "m4a"
+                        elif out_ext not in ["mp3", "flac", "wav"]: out_ext = "mp3"
 
                         no_vocals_dest = os.path.join(input_dir, f"{input_base}_no_vocals.{out_ext}")
                         self.log_signal.emit(f"Đang xuất tệp nhạc nền định dạng {out_ext.upper()}...")
@@ -266,10 +255,7 @@ class TranscribeWorker(QtCore.QThread):
                             except Exception as move_err:
                                 self.log_signal.emit(f"Cảnh báo: Không thể di chuyển tệp không lời: {move_err}")
                         else:
-                            ffmpeg_novoc_cmd = [
-                                FFMPEG_PATH, "-y", "-i", no_vocal_file,
-                                "-acodec", acodec
-                            ] + acodec_opts + [no_vocals_dest]
+                            ffmpeg_novoc_cmd = [FFMPEG_PATH, "-y", "-i", no_vocal_file, no_vocals_dest]
                             
                             self.current_process = subprocess.Popen(
                                 ffmpeg_novoc_cmd,
@@ -375,16 +361,7 @@ class TranscribeWorker(QtCore.QThread):
             
         model_path = os.path.join(MODELS_DIR, self.model_filename)
         
-        lang_mapping = {
-            "Tự động phát hiện (Auto)": "auto",
-            "Tiếng Việt (vi)": "vi",
-            "Tiếng Anh (en)": "en",
-            "Tiếng Trung (zh)": "zh",
-            "Tiếng Nhật (ja)": "ja",
-            "Tiếng Pháp (fr)": "fr"
-        }
-        lang_code = lang_mapping.get(self.lang_text, "auto")
-        
+        lang_code = self.lang_text.split("(")[-1].strip(")").lower()        
         # Check and download VAD model
         vad_model_path = os.path.join(MODELS_DIR, "ggml-silero-vad.bin")
         use_vad = False

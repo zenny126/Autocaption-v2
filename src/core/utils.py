@@ -11,15 +11,7 @@ def format_size(bytes_num):
         bytes_num /= 1024
     return f"{bytes_num:.1f} TB"
 
-def get_audio_codec(file_path):
-    cmd = [FFMPEG_PATH, "-i", file_path]
-    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=CREATION_FLAGS)
-    _, stderr = process.communicate()
-    output = stderr.decode("utf-8", errors="ignore")
-    match = re.search(r"Audio:\s+([a-zA-Z0-9_]+)", output)
-    if match:
-        return match.group(1).lower()
-    return "mp3"
+
 
 def get_whisper_exe():
     candidates = [
